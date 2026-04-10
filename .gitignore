@@ -1,0 +1,34 @@
+# Environment
+.env
+.env.local
+web/.env.local
+
+# Database
+data/finance.db
+data/finance.db-wal
+data/finance.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+api/.venv/
+
+# Node
+web/node_modules/
+web/.next/
+web/out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+*.log

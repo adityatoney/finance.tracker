@@ -1,0 +1,81 @@
+name: ft
+
+services:
+  # ── Convex Backend ──────────────────────────────────────────────────────────
+  convexDB-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: ft-convexDB-backend
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    # Override entrypoint to patch the hardcoded internal ports (3210/3211)
+    # so they match the host-side ports. This lets localhost:<port> work from
+    # INSIDE the container (needed for internal URL resolution).
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sed -i "s/--port 3210/--port $${FT_PORT_CONVEX:-10610}/;s/--site-proxy-port 3211/--site-proxy-port $${FT_PORT_SITE_PROXY:-10615}/" ./run_backend.sh
+        exec ./run_backend.sh
+    ports:
+      - "${FT_PORT_CONVEX:-10610}:${FT_PORT_CONVEX:-10610}"
+      - "${FT_PORT_SITE_PROXY:-10615}:${FT_PORT_SITE_PROXY:-10615}"
+    volumes:
+      - ${SSD_DATA}/finance.tracker/convex:/convex/data
+    environment:
+      - PORT=${FT_PORT_CONVEX:-10610}
+      - SITE_PROXY_PORT=${FT_PORT_SITE_PROXY:-10615}
+      - CONVEX_CLOUD_ORIGIN=${CONVEX_CLOUD_ORIGIN:-http://localhost:${FT_PORT_CONVEX:-10610}}
+      - CONVEX_SITE_ORIGIN=${CONVEX_SITE_ORIGIN:-http://localhost:${FT_PORT_SITE_PROXY:-10615}}
+      - DISABLE_METRICS_ENDPOINT=${DISABLE_METRICS_ENDPOINT:-true}
+      - DOCUMENT_RETENTION_DELAY=${DOCUMENT_RETENTION_DELAY:-172800}
+      - DO_NOT_REQUIRE_SSL
+      - RUST_LOG=${RUST_LOG:-info}
+    healthcheck:
+      test: curl -f http://localhost:${FT_PORT_CONVEX:-10610}/version
+      interval: 5s
+      start_period: 10s
+
+  # ── Convex Dashboard ────────────────────────────────────────────────────────
+  convexDB-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: ft-convexDB-dashboard
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports:
+      - "${FT_PORT_DASHBOARD:-10617}:6791"
+    environment:
+      - NEXT_PUBLIC_DEPLOYMENT_URL=${NEXT_PUBLIC_DEPLOYMENT_URL:-http://localhost:${FT_PORT_CONVEX:-10610}}
+    depends_on:
+      convexDB-backend:
+        condition: service_healthy
+
+  # ── Stateless PDF/CSV parser — only pdfplumber, no DB ───────────────────────
+  parser:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "${FT_PORT_API:-10611}:8000"
+    volumes:
+      - ./api:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Next.js frontend (prod mode via Docker) ─────────────────────────────────
+  web:
+    profiles: [prod]
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "${FT_PORT_WEB:-10613}:3000"
+    volumes:
+      - ./web/src:/app/src
+    env_file: .env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:${FT_PORT_API:-10611}
+    depends_on:
+      parser:
+        condition: service_healthy
