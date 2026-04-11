@@ -162,12 +162,14 @@ class NetBenefitsPDFParser(PDFParserMixin, BaseParser):
             tracking_mode="detailed",  # Let user choose in UI
         )
 
-        # ── Deposits (contributions) ──
+        # ── Deposits — YOUR contributions ONLY ──
+        # Employer contributions are tracked in warnings metadata but NOT as deposits.
+        # This ensures netDeposits on the statement and snapshots reflect only your money.
         deposits: list[DepositParsed] = []
         if your_contrib > 0:
             deposits.append(DepositParsed(amount=your_contrib, description="Your Contributions"))
-        if employer_contrib > 0:
-            deposits.append(DepositParsed(amount=employer_contrib, description="Employer Contributions"))
+        # Employer contributions intentionally excluded from deposits list.
+        # They're recorded in warnings as "employer_contributions:XXXX" for reference.
 
         return ParseResult(
             accounts=[account],

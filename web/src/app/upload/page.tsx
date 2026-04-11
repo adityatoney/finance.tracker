@@ -18,10 +18,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
-import { FileDropzone } from "@/components/upload/file-dropzone";
+import { FileDropzone, type FileEntry } from "@/components/upload/file-dropzone";
 import { DryRunResults } from "@/components/upload/dry-run-results";
 import { CommitDialog } from "@/components/upload/commit-dialog";
-import { BROKERAGES } from "@/lib/constants/categories";
+import { BROKERAGES, CATEGORIES, CATEGORY_ORDER } from "@/lib/constants/categories";
 import type { AssetCategory, ParseResult, TrackingMode } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils/format";
 import {
@@ -129,6 +129,14 @@ export default function UploadPage() {
   const [aggregateCategories, setAggregateCategories] = useState<Record<string, string>>({});
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Multi-file batch state ──
+  const [uploadMode, setUploadMode] = useState<"single" | "batch">("single");
+  const [batchFiles, setBatchFiles] = useState<FileEntry[]>([]);
+  const [batchResults, setBatchResults] = useState<Map<string, { result?: ParseResult; error?: string }>>(new Map());
+  const [batchState, setBatchState] = useState<"idle" | "parsing" | "parsed" | "committing" | "committed">("idle");
+  // Per-file, per-account settings: key = `${fileId}::${accountNumber}`, value = { mode, category }
+  const [batchAccountSettings, setBatchAccountSettings] = useState<Record<string, { mode: TrackingMode; category: string }>>({});
 
   const commitMutation = useMutation(api.statements.commit);
   const retirementCommit = useMutation(api.retirement.commit);
@@ -326,7 +334,166 @@ export default function UploadPage() {
     setTickerOverrides({});
     setTrackingModes({});
     setError(null);
+    // Also reset batch
+    setBatchFiles([]);
+    setBatchResults(new Map());
+    setBatchState("idle");
   };
+
+  // ── Batch handlers ──
+  const handleBatchFilesAdded = (newFiles: File[]) => {
+    const entries: FileEntry[] = newFiles.map((f) => ({
+      id: `${f.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      file: f,
+      statementDate: "",
+    }));
+    setBatchFiles((prev) => [...prev, ...entries]);
+  };
+
+  const handleBatchFileRemove = (id: string) => {
+    setBatchFiles((prev) => prev.filter((f) => f.id !== id));
+    setBatchResults((prev) => { const next = new Map(prev); next.delete(id); return next; });
+  };
+
+  const handleBatchFileDateChange = (id: string, date: string) => {
+    setBatchFiles((prev) => prev.map((f) => f.id === id ? { ...f, statementDate: date } : f));
+  };
+
+  const getBatchAccountKey = (fileId: string, acctNum: string) => `${fileId}::${acctNum}`;
+
+  const handleBatchAccountMode = (fileId: string, acctNum: string, mode: TrackingMode) => {
+    const key = getBatchAccountKey(fileId, acctNum);
+    setBatchAccountSettings((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] || { mode: "detailed", category: "" }), mode },
+    }));
+  };
+
+  const handleBatchAccountCategory = (fileId: string, acctNum: string, category: string) => {
+    const key = getBatchAccountKey(fileId, acctNum);
+    setBatchAccountSettings((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] || { mode: "aggregate", category: "" }), category },
+    }));
+  };
+
+  const handleBatchParseAll = async () => {
+    if (!brokerage || batchFiles.some((f) => !f.statementDate)) return;
+    setBatchState("parsing");
+    setError(null);
+    const results = new Map<string, { result?: ParseResult; error?: string }>();
+
+    // Parse all files in parallel
+    const promises = batchFiles.map(async (entry) => {
+      try {
+        const result = await parseFile(entry.file, brokerage, entry.statementDate);
+        results.set(entry.id, { result });
+      } catch (err) {
+        results.set(entry.id, { error: err instanceof Error ? err.message : "Parse failed" });
+      }
+    });
+
+    await Promise.all(promises);
+    setBatchResults(results);
+
+    // Auto-set default tracking mode for accounts with 0 holdings → aggregate
+    const defaults: Record<string, { mode: TrackingMode; category: string }> = {};
+    for (const [fileId, res] of results.entries()) {
+      if (!res.result) continue;
+      for (let acctIdx = 0; acctIdx < res.result.accounts.length; acctIdx++) {
+        const acct = res.result.accounts[acctIdx];
+        const acctKey = acct.account_number || acct.account_number_masked || `acct-${acctIdx}`;
+        const key = getBatchAccountKey(fileId, acctKey);
+        defaults[key] = {
+          mode: acct.holdings.length === 0 ? "aggregate" : "detailed",
+          category: "",
+        };
+      }
+    }
+    setBatchAccountSettings(defaults);
+    setBatchState("parsed");
+  };
+
+  const handleBatchCommitAll = async () => {
+    setBatchState("committing");
+    setError(null);
+    let committed = 0;
+    let failed = 0;
+
+    for (const [id, entry] of batchResults.entries()) {
+      if (!entry.result) continue;
+      const pr = entry.result;
+      const fileEntry = batchFiles.find((f) => f.id === id);
+      if (!fileEntry) continue;
+
+      // Extract file hash from warnings
+      let fileHash = "";
+      for (const w of pr.warnings) {
+        if (w.startsWith("file_hash:")) { fileHash = w.slice(10); break; }
+      }
+
+      try {
+        await commitMutation({
+          brokerage: pr.brokerage,
+          statementDate: pr.statement_date,
+          fileName: fileEntry.file.name,
+          fileHash,
+          accounts: pr.accounts.map((a) => {
+            const settingsKey = getBatchAccountKey(id, a.account_number || a.account_number_masked);
+            const settings = batchAccountSettings[settingsKey];
+            return {
+              account_number: a.account_number,
+              account_number_masked: a.account_number_masked,
+              account_type: a.account_type || undefined,
+              owner_name: a.owner_name || undefined,
+              total_value: a.total_value,
+              beginning_value: a.beginning_value ?? undefined,
+              ending_value: a.ending_value ?? undefined,
+              change_in_investment: a.change_in_investment ?? undefined,
+              tracking_mode: settings?.mode || (a.holdings.length === 0 ? "aggregate" : "detailed"),
+              aggregate_category: settings?.category || undefined,
+              holdings: a.holdings.map((h) => ({
+                ticker: h.ticker,
+                name: h.name ?? undefined,
+                quantity: h.quantity ?? undefined,
+                price: h.price ?? undefined,
+                market_value: h.market_value,
+                beginning_value: h.beginning_value ?? undefined,
+                ending_value: h.ending_value ?? undefined,
+                cost_basis: h.cost_basis ?? undefined,
+                category: h.category ?? undefined,
+              })),
+            };
+          }),
+          deposits: pr.deposits.map((d) => ({
+            amount: d.amount,
+            description: d.description || undefined,
+            date: d.date ?? undefined,
+          })),
+          tickerOverrides: [],
+        });
+        committed++;
+      } catch (err) {
+        failed++;
+        // Mark this entry as failed in results
+        const existing = batchResults.get(id);
+        if (existing) {
+          batchResults.set(id, { ...existing, error: err instanceof Error ? err.message : "Commit failed" });
+        }
+      }
+    }
+
+    if (failed > 0) {
+      setError(`${committed} committed, ${failed} failed`);
+      setBatchState("parsed");
+    } else {
+      setBatchState("committed");
+    }
+  };
+
+  const batchReadyToCommit = batchState === "parsed" && [...batchResults.values()].some((r) => r.result);
+  const batchSuccessCount = [...batchResults.values()].filter((r) => r.result && !r.error).length;
+  const batchErrorCount = [...batchResults.values()].filter((r) => r.error).length;
 
   const totalValue = parseResult?.accounts.reduce((s, a) => s + a.total_value, 0) ?? 0;
   const totalHoldings = parseResult?.accounts.reduce((s, a) => s + a.holdings.length, 0) ?? 0;
@@ -346,11 +513,35 @@ export default function UploadPage() {
             </p>
           </div>
         </div>
-        {state !== "idle" && state !== "committed" && (
-          <Button variant="ghost" size="sm" onClick={handleReset} className="text-muted-foreground">
-            <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {(state === "idle" || uploadMode === "batch" && batchState === "idle") && (
+            <div className="flex rounded-lg border p-0.5">
+              <button
+                onClick={() => { handleReset(); setUploadMode("single"); }}
+                className={cn(
+                  "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  uploadMode === "single" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Single
+              </button>
+              <button
+                onClick={() => { handleReset(); setUploadMode("batch"); }}
+                className={cn(
+                  "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  uploadMode === "batch" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Batch
+              </button>
+            </div>
+          )}
+          {((uploadMode === "single" && state !== "idle" && state !== "committed") || (uploadMode === "batch" && batchState !== "idle" && batchState !== "committed")) && (
+            <Button variant="ghost" size="sm" onClick={handleReset} className="text-muted-foreground">
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -358,6 +549,287 @@ export default function UploadPage() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+
+      {/* ══════════════════════════ BATCH MODE ══════════════════════════ */}
+      {uploadMode === "batch" && (
+        <>
+          {batchState === "committed" ? (
+            <Card className="border-emerald-200 bg-gradient-to-b from-emerald-50/80 to-emerald-50/30 dark:border-emerald-900 dark:from-emerald-950/30 dark:to-emerald-950/10">
+              <CardContent className="flex flex-col items-center justify-center py-20">
+                <div className="rounded-full bg-emerald-100 dark:bg-emerald-900/60 p-5 mb-5">
+                  <CheckCircle2 className="h-10 w-10 text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <p className="text-xl font-semibold">{batchSuccessCount} statement{batchSuccessCount !== 1 ? "s" : ""} committed</p>
+                <p className="text-sm text-muted-foreground mt-1.5">Holdings and snapshots have been updated.</p>
+                <div className="flex gap-3 mt-8">
+                  <Button variant="outline" onClick={handleReset}>
+                    <RotateCcw className="mr-2 h-4 w-4" /> Upload More
+                  </Button>
+                  <Button onClick={() => router.push("/dashboard")}>
+                    View Dashboard <ArrowRight className="ml-2 h-4 w-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* Batch: File selection + brokerage */}
+              <Card>
+                <CardContent className="pt-6 space-y-5">
+                  <FileDropzone
+                    mode="multi"
+                    files={batchFiles}
+                    onFilesAdded={handleBatchFilesAdded}
+                    onFileRemove={handleBatchFileRemove}
+                    onFileDateChange={handleBatchFileDateChange}
+                    disabled={batchState === "parsing" || batchState === "committing"}
+                  />
+
+                  <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="space-y-2 sm:w-56">
+                      <Label className="text-sm font-medium">Brokerage (all files)</Label>
+                      <Select value={brokerage} onValueChange={(v) => v && setBrokerage(v)}>
+                        <SelectTrigger className="h-10">
+                          <SelectValue placeholder="Select brokerage" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {BROKERAGES.map((b) => (
+                            <SelectItem key={b.value} value={b.value}>{b.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="flex items-end flex-1">
+                      <Button
+                        onClick={handleBatchParseAll}
+                        disabled={
+                          batchFiles.length === 0 ||
+                          !brokerage ||
+                          batchFiles.some((f) => !f.statementDate) ||
+                          batchState === "parsing" ||
+                          batchState === "committing"
+                        }
+                        className="h-10"
+                        size="lg"
+                      >
+                        {batchState === "parsing" ? (
+                          <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Parsing {batchFiles.length} files...</>
+                        ) : (
+                          <><Upload className="mr-2 h-4 w-4" /> Parse All ({batchFiles.length})</>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {batchFiles.length > 0 && batchFiles.some((f) => !f.statementDate) && (
+                    <p className="text-xs text-amber-600">
+                      <AlertTriangle className="inline h-3 w-3 mr-1" />
+                      All files need a statement date before parsing.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Batch: Parse results */}
+              {batchState === "parsed" && (
+                <>
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">Batch Parse Results</CardTitle>
+                      <CardDescription>
+                        {batchSuccessCount} parsed successfully
+                        {batchErrorCount > 0 && ` · ${batchErrorCount} failed`}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {batchFiles.map((entry) => {
+                        const res = batchResults.get(entry.id);
+                        if (!res) return null;
+                        return (
+                          <div
+                            key={entry.id}
+                            className={cn(
+                              "rounded-lg border px-4 py-3 space-y-3",
+                              res.error ? "border-red-200 bg-red-50/50 dark:border-red-900 dark:bg-red-950/20" : "border-emerald-200/50 bg-card"
+                            )}
+                          >
+                            {/* File header */}
+                            <div className="flex items-center gap-3">
+                              {res.error ? (
+                                <AlertTriangle className="h-4 w-4 text-red-500 shrink-0" />
+                              ) : (
+                                <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium truncate">{entry.file.name}</p>
+                                {res.result && (
+                                  <p className="text-xs text-muted-foreground">
+                                    {res.result.accounts.length} account{res.result.accounts.length !== 1 ? "s" : ""}
+                                    {" · "}{formatCurrency(res.result.accounts.reduce((s, a) => s + a.total_value, 0))}
+                                    {" · "}{entry.statementDate}
+                                  </p>
+                                )}
+                                {res.error && (
+                                  <p className="text-xs text-red-600 dark:text-red-400">{res.error}</p>
+                                )}
+                              </div>
+                              <Badge variant={res.error ? "destructive" : "default"} className={res.error ? "" : "bg-emerald-500"}>
+                                {res.error ? "Failed" : "Ready"}
+                              </Badge>
+                            </div>
+
+                            {/* Per-account settings */}
+                            {res.result && res.result.accounts.map((acct, acctIdx) => {
+                              const acctKey = acct.account_number || acct.account_number_masked || `acct-${acctIdx}`;
+                              const settingsKey = getBatchAccountKey(entry.id, acctKey);
+                              const settings = batchAccountSettings[settingsKey] || { mode: acct.holdings.length === 0 ? "aggregate" : "detailed", category: "" };
+                              const isAggregate = settings.mode === "aggregate";
+
+                              return (
+                                <div key={acctIdx} className="rounded-md border bg-muted/20 px-3 py-2.5 space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-semibold">{acct.account_type || "Account"}</span>
+                                      <Badge variant="outline" className="font-mono text-[10px]">
+                                        {acct.account_number_masked || acctKey}
+                                      </Badge>
+                                      {acct.beginning_value != null && acct.ending_value != null && (
+                                        <span className="text-[11px] text-muted-foreground">
+                                          {formatCurrency(acct.beginning_value)} → <strong>{formatCurrency(acct.ending_value)}</strong>
+                                        </span>
+                                      )}
+                                    </div>
+                                    {/* Tracking mode toggle */}
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex rounded-md border p-0.5">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleBatchAccountMode(entry.id, acctKey, "aggregate")}
+                                          className={cn(
+                                            "rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
+                                            isAggregate ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                                          )}
+                                        >
+                                          Aggregate
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleBatchAccountMode(entry.id, acctKey, "detailed")}
+                                          className={cn(
+                                            "rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
+                                            !isAggregate ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                                          )}
+                                        >
+                                          Detailed
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Category selector for aggregate accounts */}
+                                  {isAggregate && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[11px] text-muted-foreground">Category:</span>
+                                      <Select
+                                        defaultValue=""
+                                        value={settings.category}
+                                        onValueChange={(val) => {
+                                          if (val) handleBatchAccountCategory(entry.id, acctKey, String(val));
+                                        }}
+                                      >
+                                        <SelectTrigger className="h-7 w-[160px] text-xs">
+                                          <SelectValue placeholder="Select category">
+                                            {(selectedValue: unknown) => {
+                                              const val = String(selectedValue || "");
+                                              const meta = val ? CATEGORIES[val as AssetCategory] : null;
+                                              return meta ? (
+                                                <span className="inline-flex items-center gap-1.5">
+                                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: meta.color }} />
+                                                  {meta.label}
+                                                </span>
+                                              ) : "Select category";
+                                            }}
+                                          </SelectValue>
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          {CATEGORY_ORDER.map((cat) => (
+                                            <SelectItem key={cat} value={cat} className="text-xs">
+                                              <span className="inline-flex items-center gap-1.5">
+                                                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: CATEGORIES[cat].color }} />
+                                                {CATEGORIES[cat].label}
+                                              </span>
+                                            </SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
+                                      {!settings.category && (
+                                        <span className="text-[10px] text-amber-500">Required</span>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* Holdings count for detailed */}
+                                  {!isAggregate && acct.holdings.length > 0 && (
+                                    <p className="text-[11px] text-muted-foreground">
+                                      {acct.holdings.length} holding{acct.holdings.length !== 1 ? "s" : ""} will be imported individually
+                                    </p>
+                                  )}
+                                  {!isAggregate && acct.holdings.length === 0 && (
+                                    <p className="text-[11px] text-amber-500">
+                                      ⚠ No holdings found — switch to Aggregate
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </CardContent>
+                  </Card>
+
+                  {/* Batch commit button */}
+                  {batchSuccessCount > 0 && (() => {
+                    // Check if any aggregate account is missing a category
+                    const missingCategories = Object.entries(batchAccountSettings).filter(
+                      ([, s]) => s.mode === "aggregate" && !s.category
+                    );
+                    const blocked = missingCategories.length > 0;
+
+                    return (
+                      <Card className={blocked ? "border-amber-300 dark:border-amber-700" : ""}>
+                        <CardContent className="pt-6 space-y-3">
+                          {blocked && (
+                            <p className="text-xs text-amber-600 flex items-center gap-1.5">
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                              {missingCategories.length} aggregate account{missingCategories.length !== 1 ? "s need" : " needs"} a category before committing.
+                            </p>
+                          )}
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm text-muted-foreground">
+                              <strong className="text-foreground">{batchSuccessCount}</strong> statement{batchSuccessCount !== 1 ? "s" : ""} ready
+                            </p>
+                            <div className="flex gap-3">
+                              <Button variant="outline" onClick={handleReset}>Cancel</Button>
+                              <Button onClick={handleBatchCommitAll} disabled={blocked}>
+                                <CheckCircle2 className="mr-2 h-4 w-4" /> Commit All ({batchSuccessCount})
+                              </Button>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })()}
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
+
+      {/* ══════════════════════════ SINGLE MODE ══════════════════════════ */}
+      {uploadMode === "single" && <>
 
       {/* ── SUCCESS STATE ── */}
       {state === "committed" ? (
@@ -717,6 +1189,8 @@ export default function UploadPage() {
           )}
         </>
       )}
+
+      </>}
     </div>
   );
 }

@@ -52,9 +52,33 @@ export const getLatestMonth = query({
 export const getAllMonths = query({
   args: {},
   handler: async (ctx) => {
-    const stmts = await ctx.db.query("statements").order("desc").collect();
-    const months = [...new Set(stmts.map((s) => s.statementDate))];
+    const stmts = await ctx.db.query("statements").collect();
+    const months = [...new Set(stmts.map((s) => s.statementDate))].sort().reverse();
     return months;
+  },
+});
+
+// Update category on a single holding by ID
+export const updateCategory = mutation({
+  args: { holdingId: v.id("holdings"), category: v.string() },
+  handler: async (ctx, { holdingId, category }) => {
+    const holding = await ctx.db.get(holdingId);
+    if (!holding) throw new Error("Holding not found");
+
+    await ctx.db.patch(holdingId, { category });
+
+    // Rebuild snapshots for the affected month
+    const stmt = await ctx.db.get(holding.statementId);
+    if (stmt) {
+      // Import inline to avoid circular deps
+      const snapshots = await ctx.db
+        .query("monthlySnapshots")
+        .withIndex("by_month", (q) => q.eq("month", stmt.statementDate))
+        .collect();
+      // We'll let the client call rebuildMonth separately if needed
+    }
+
+    return { updated: true, month: stmt?.statementDate };
   },
 });
 

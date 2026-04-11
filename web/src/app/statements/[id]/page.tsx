@@ -48,7 +48,8 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
   const { id } = use(params);
   const statement = useQuery(api.statements.getById, { id: id as any });
   const holdings = useQuery(api.holdings.listByStatement, { statementId: id as any });
-  const recategorize = useMutation(api.holdings.recategorize);
+  const updateCategory = useMutation(api.holdings.updateCategory);
+  const rebuildMonth = useMutation(api.snapshots.rebuildMonth);
 
   if (statement === undefined || holdings === undefined) {
     return (
@@ -93,8 +94,12 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
     holdingsByAccount[key].push(h);
   }
 
-  const handleRecategorize = async (ticker: string, category: string) => {
-    await recategorize({ ticker, category });
+  const handleRecategorize = async (holdingId: string, category: string) => {
+    const result = await updateCategory({ holdingId: holdingId as any, category });
+    // Rebuild snapshots for the affected month
+    if (result?.month) {
+      await rebuildMonth({ month: result.month });
+    }
   };
 
   return (
@@ -136,8 +141,15 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
             <CategoryDistributionBar
               holdings={holdings.map((h: any) => ({
                 ticker: h.ticker,
+                name: h.name ?? "",
+                quantity: null,
+                price: null,
                 market_value: h.marketValue,
+                beginning_value: null,
+                ending_value: null,
+                cost_basis: null,
                 category: h.category,
+                category_source: null,
               }))}
             />
           </CardContent>
@@ -224,8 +236,15 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
                     <CategoryDistributionBar
                       holdings={acctHoldings.map((h: any) => ({
                         ticker: h.ticker,
+                        name: h.name ?? "",
+                        quantity: null,
+                        price: null,
                         market_value: h.marketValue,
+                        beginning_value: null,
+                        ending_value: null,
+                        cost_basis: null,
                         category: h.category,
+                        category_source: null,
                       }))}
                     />
                   </div>
@@ -260,24 +279,29 @@ export default function StatementDetailPage({ params }: { params: Promise<{ id: 
                             </TableCell>
                             <TableCell className="py-1.5">
                               <Select
+                                defaultValue=""
                                 value={h.category || ""}
                                 onValueChange={(val) => {
-                                  if (val) handleRecategorize(h.ticker, val);
+                                  if (val) handleRecategorize(h._id, String(val));
                                 }}
                               >
                                 <SelectTrigger className={cn(
                                   "h-6 w-[130px] text-[10px] shadow-none",
                                   "border-0 bg-transparent px-0 hover:bg-muted/50 focus:ring-0"
                                 )}>
-                                  <SelectValue>
-                                    {catMeta ? (
-                                      <span className="inline-flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: catMeta.color }} />
-                                        {catMeta.label}
-                                      </span>
-                                    ) : (
-                                      <span className="text-muted-foreground">Uncategorized</span>
-                                    )}
+                                  <SelectValue placeholder="Uncategorized">
+                                    {(selectedValue: unknown) => {
+                                      const val = String(selectedValue || h.category || "");
+                                      const meta = val ? CATEGORIES[val as AssetCategory] : null;
+                                      return meta ? (
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: meta.color }} />
+                                          {meta.label}
+                                        </span>
+                                      ) : (
+                                        <span className="text-amber-500">Uncategorized</span>
+                                      );
+                                    }}
                                   </SelectValue>
                                 </SelectTrigger>
                                 <SelectContent>

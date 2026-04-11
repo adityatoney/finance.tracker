@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
@@ -35,6 +36,9 @@ import {
   Briefcase,
   Target,
   CalendarDays,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -114,13 +118,17 @@ function StatCard({
 export default function DashboardPage() {
   const snapshots = useQuery(api.snapshots.list);
   const statements = useQuery(api.statements.list);
+  const depositsByMonth = useQuery(api.snapshots.depositsByMonth);
   const latestMonth = useQuery(api.holdings.getLatestMonth);
   const latestHoldings = useQuery(
     api.holdings.listForMonth,
     latestMonth ? { month: latestMonth } : "skip"
   );
 
-  if (snapshots === undefined || statements === undefined) {
+  // MoM table sort
+  const [momSortDir, setMomSortDir] = useState<"asc" | "desc">("desc");
+
+  if (snapshots === undefined || statements === undefined || depositsByMonth === undefined) {
     return <DashboardSkeleton />;
   }
 
@@ -129,13 +137,22 @@ export default function DashboardPage() {
   const currentMonth = months[months.length - 1] ?? null;
   const prevMonth = months[months.length - 2] ?? null;
 
+  // Deposits per month come from the deposits TABLE (filtered to exclude employer contributions)
+  // via the depositsByMonth Convex query — this is the source of truth, not snapshot netDeposits.
   const monthTotals = new Map<string, { total: number; deposits: number; gain: number }>();
   for (const s of snapshots) {
     if (!monthTotals.has(s.month)) monthTotals.set(s.month, { total: 0, deposits: 0, gain: 0 });
     const m = monthTotals.get(s.month)!;
     m.total += s.totalValue;
-    m.deposits += s.netDeposits;
     m.gain += s.marketGain;
+  }
+  // Set deposits from the filtered deposits query (YOUR contributions only)
+  for (const [month, amount] of Object.entries(depositsByMonth)) {
+    if (monthTotals.has(month)) {
+      monthTotals.get(month)!.deposits = amount;
+    } else {
+      monthTotals.set(month, { total: 0, deposits: amount, gain: 0 });
+    }
   }
 
   const current = monthTotals.get(currentMonth ?? "") ?? { total: 0, deposits: 0, gain: 0 };
@@ -315,16 +332,6 @@ export default function DashboardPage() {
             </Card>
           </div>
 
-          {/* Allocation */}
-          <div className="space-y-3">
-            <SectionHeader icon={PieChart} title="Allocation" />
-            <Card>
-              <CardContent className="pt-6">
-                <AllocationDonutChart data={allocationData} />
-              </CardContent>
-            </Card>
-          </div>
-
           {/* MoM Detail Table */}
           {months.length > 0 && (
             <div className="space-y-3">
@@ -334,7 +341,15 @@ export default function DashboardPage() {
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-muted/50">
-                        <TableHead className="font-semibold">Month</TableHead>
+                        <TableHead className="font-semibold">
+                          <button
+                            onClick={() => setMomSortDir(momSortDir === "desc" ? "asc" : "desc")}
+                            className="inline-flex items-center gap-1"
+                          >
+                            Month
+                            {momSortDir === "desc" ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
+                          </button>
+                        </TableHead>
                         <TableHead className="text-right font-semibold">Portfolio Value</TableHead>
                         <TableHead className="text-right font-semibold">Deposits</TableHead>
                         <TableHead className="text-right font-semibold">Market Gain</TableHead>
@@ -345,7 +360,7 @@ export default function DashboardPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {[...months].reverse().map((m, i) => {
+                      {(momSortDir === "desc" ? [...months].reverse() : [...months]).map((m, i) => {
                         const data = monthTotals.get(m) ?? { total: 0, deposits: 0, gain: 0 };
                         const monthIdx = months.indexOf(m);
                         const prevData = monthIdx > 0 ? monthTotals.get(months[monthIdx - 1]) ?? { total: 0, deposits: 0, gain: 0 } : null;
@@ -376,6 +391,16 @@ export default function DashboardPage() {
               </Card>
             </div>
           )}
+
+          {/* Allocation — at the bottom */}
+          <div className="space-y-3">
+            <SectionHeader icon={PieChart} title="Allocation" />
+            <Card>
+              <CardContent className="pt-6">
+                <AllocationDonutChart data={allocationData} />
+              </CardContent>
+            </Card>
+          </div>
         </>
       )}
     </div>

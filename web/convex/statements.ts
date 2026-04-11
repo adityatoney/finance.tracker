@@ -181,7 +181,13 @@ export const commit = mutation({
 
     // Compute totals
     const totalValue = args.accounts.reduce((s, a) => s + a.total_value, 0);
-    const totalDeposits = args.deposits.reduce((s, d) => s + d.amount, 0);
+    // Only track YOUR contributions as deposits — exclude employer contributions
+    const totalDeposits = args.deposits
+      .filter((d) => {
+        const desc = (d.description || "").toLowerCase();
+        return !desc.includes("employer");
+      })
+      .reduce((s, d) => s + d.amount, 0);
 
     // Encrypt PII from the first account
     const primaryAcct = args.accounts[0];
@@ -232,6 +238,8 @@ export const commit = mutation({
           quantity: 1,
           price: account.total_value,
           marketValue: account.total_value,
+          beginningValue: account.beginning_value,
+          endingValue: account.ending_value,
           category: account.aggregate_category || "uncategorized",
           brokerage: args.brokerage,
           accountNumber: account.account_number,
@@ -382,7 +390,10 @@ async function rebuildMonthInternal(ctx: any, month: string) {
       .query("deposits")
       .withIndex("by_statement", (q: any) => q.eq("statementId", stmt._id))
       .collect();
-    totalDeposits += deposits.reduce((s: number, d: any) => s + d.amount, 0);
+    // Only count YOUR contributions — exclude employer contributions
+    totalDeposits += deposits
+      .filter((d: any) => !(d.description || "").toLowerCase().includes("employer"))
+      .reduce((s: number, d: any) => s + d.amount, 0);
   }
 
   const totalValueAll = Object.values(categoryTotals).reduce((s, v) => s + v, 0) || 1;
@@ -403,8 +414,9 @@ async function rebuildMonthInternal(ctx: any, month: string) {
     .collect();
   for (const s of existingSnapshots) await ctx.db.delete(s._id);
 
-  // Create new snapshots
-  for (const category of CATEGORIES) {
+  // Create new snapshots — include ALL categories that have holdings (not just the 5 standard ones)
+  const allCategories = new Set([...CATEGORIES, ...Object.keys(categoryTotals)]);
+  for (const category of allCategories) {
     const currentValue = categoryTotals[category] ?? 0;
     const prevValue = prevSnapshots[category] ?? 0;
     const proportion = currentValue / totalValueAll;

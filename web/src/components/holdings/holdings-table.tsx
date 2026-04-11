@@ -41,7 +41,7 @@ export interface ConvexHolding {
   costBasis?: number | null;
 }
 
-type SortField = "ticker" | "name" | "brokerage" | "category" | "quantity" | "price" | "marketValue";
+type SortField = "ticker" | "name" | "brokerage" | "category" | "quantity" | "price" | "marketValue" | "pctOfPortfolio";
 type SortDir = "asc" | "desc";
 
 interface HoldingsTableProps {
@@ -52,10 +52,11 @@ interface HoldingsTableProps {
 export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [brokerageFilter, setBrokerageFilter] = useState<string>("all");
   const [sortField, setSortField] = useState<SortField>("marketValue");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
-  // Compute category counts for filter tabs
+  // Compute category and brokerage counts for filter tabs
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const h of holdings) {
@@ -63,6 +64,20 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
     }
     return counts;
   }, [holdings]);
+
+  const brokerageCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const h of holdings) {
+      const b = h.brokerage || "unknown";
+      counts[b] = (counts[b] || 0) + 1;
+    }
+    return counts;
+  }, [holdings]);
+
+  const uniqueBrokerages = useMemo(
+    () => Object.keys(brokerageCounts).sort(),
+    [brokerageCounts]
+  );
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -81,6 +96,14 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
     }
   };
 
+  // Total portfolio value (across ALL holdings, not just filtered)
+  const portfolioTotal = useMemo(
+    () => holdings.reduce((s, h) => s + h.marketValue, 0),
+    [holdings]
+  );
+
+  const getPct = (value: number) => portfolioTotal > 0 ? (value / portfolioTotal) * 100 : 0;
+
   const filtered = useMemo(() => {
     let result = holdings;
     if (search) {
@@ -92,7 +115,13 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
     if (categoryFilter !== "all") {
       result = result.filter((h) => h.category === categoryFilter);
     }
+    if (brokerageFilter !== "all") {
+      result = result.filter((h) => h.brokerage === brokerageFilter);
+    }
     return [...result].sort((a, b) => {
+      if (sortField === "pctOfPortfolio") {
+        return sortDir === "asc" ? a.marketValue - b.marketValue : b.marketValue - a.marketValue;
+      }
       const av = a[sortField];
       const bv = b[sortField];
       let cmp = 0;
@@ -100,7 +129,7 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
       else cmp = String(av).localeCompare(String(bv));
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [holdings, search, categoryFilter, sortField, sortDir]);
+  }, [holdings, search, categoryFilter, brokerageFilter, sortField, sortDir]);
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return <ArrowUpDown className="ml-1 h-3 w-3 opacity-30" />;
@@ -157,6 +186,46 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
         })}
       </div>
 
+      {/* Brokerage filter pills */}
+      {uniqueBrokerages.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/60 mr-1">
+            Brokerage
+          </span>
+          <button
+            onClick={() => setBrokerageFilter("all")}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition-colors",
+              brokerageFilter === "all"
+                ? "border-foreground/20 bg-foreground text-background font-medium"
+                : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            )}
+          >
+            All
+            <span className={cn("text-xs tabular-nums", brokerageFilter === "all" ? "opacity-80" : "opacity-50")}>
+              {holdings.length}
+            </span>
+          </button>
+          {uniqueBrokerages.map((b) => (
+            <button
+              key={b}
+              onClick={() => setBrokerageFilter(b)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm capitalize transition-colors",
+                brokerageFilter === b
+                  ? "border-foreground/20 bg-foreground text-background font-medium"
+                  : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              )}
+            >
+              {b}
+              <span className={cn("text-xs tabular-nums", brokerageFilter === b ? "opacity-80" : "opacity-50")}>
+                {brokerageCounts[b]}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Search bar */}
       <div className="flex items-center gap-3">
         <div className="relative flex-1 max-w-sm">
@@ -175,43 +244,48 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
 
       {/* Table */}
       <Card>
-        <CardContent className="p-0">
+        <CardContent className="p-0 overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="w-[100px]">
-                  <button onClick={() => handleSort("ticker")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider">
+                <TableHead>
+                  <button onClick={() => handleSort("ticker")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
                     Ticker <SortIcon field="ticker" />
                   </button>
                 </TableHead>
                 <TableHead>
-                  <button onClick={() => handleSort("name")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider">
+                  <button onClick={() => handleSort("name")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
                     Name <SortIcon field="name" />
                   </button>
                 </TableHead>
-                <TableHead className="w-[120px]">
-                  <button onClick={() => handleSort("brokerage")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider">
+                <TableHead>
+                  <button onClick={() => handleSort("brokerage")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
                     Brokerage <SortIcon field="brokerage" />
                   </button>
                 </TableHead>
-                <TableHead className="w-[160px]">
-                  <button onClick={() => handleSort("category")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider">
+                <TableHead>
+                  <button onClick={() => handleSort("category")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
                     Category <SortIcon field="category" />
                   </button>
                 </TableHead>
-                <TableHead className="w-[100px] text-right">
-                  <button onClick={() => handleSort("quantity")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider ml-auto">
+                <TableHead className="text-right">
+                  <button onClick={() => handleSort("quantity")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap ml-auto">
                     Shares <SortIcon field="quantity" />
                   </button>
                 </TableHead>
-                <TableHead className="w-[100px] text-right">
-                  <button onClick={() => handleSort("price")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider ml-auto">
+                <TableHead className="text-right">
+                  <button onClick={() => handleSort("price")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap ml-auto">
                     Price <SortIcon field="price" />
                   </button>
                 </TableHead>
-                <TableHead className="w-[120px] text-right">
-                  <button onClick={() => handleSort("marketValue")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider ml-auto">
+                <TableHead className="text-right">
+                  <button onClick={() => handleSort("marketValue")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap ml-auto">
                     Value <SortIcon field="marketValue" />
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <button onClick={() => handleSort("pctOfPortfolio")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap ml-auto">
+                    % <SortIcon field="pctOfPortfolio" />
                   </button>
                 </TableHead>
               </TableRow>
@@ -278,12 +352,15 @@ export function HoldingsTable({ holdings, onRecategorize }: HoldingsTableProps) 
                     <TableCell className="py-3.5 text-right font-medium tabular-nums">
                       {formatCurrencyDetailed(h.marketValue)}
                     </TableCell>
+                    <TableCell className="py-3.5 text-right tabular-nums text-muted-foreground text-xs">
+                      {getPct(h.marketValue).toFixed(1)}%
+                    </TableCell>
                   </TableRow>
                 );
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-12 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
                     {search || categoryFilter !== "all"
                       ? "No holdings match your filters."
                       : "No holdings data."}
