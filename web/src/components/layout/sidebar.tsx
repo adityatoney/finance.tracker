@@ -9,6 +9,7 @@ import {
   Upload,
   Wallet,
   Tags,
+  Eye,
   Settings,
   TrendingUp,
   PiggyBank,
@@ -32,6 +33,7 @@ const navGroups = [
     label: "Analysis",
     items: [
       { href: "/holdings", label: "Holdings", icon: Wallet },
+      { href: "/watchlist", label: "Watchlist", icon: Eye },
       { href: "/ticker-map", label: "Ticker Map", icon: Tags },
     ],
   },

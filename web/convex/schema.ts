@@ -94,4 +94,31 @@ export default defineSchema({
   })
     .index("by_year", ["year"])
     .index("by_hash", ["fileHash"]),
+
+  // ── Stock Watchlist ──
+  watchlist: defineTable({
+    ticker: v.string(),
+    addedAt: v.string(),
+    notes: v.optional(v.string()),
+  }).index("by_ticker", ["ticker"]),
+
+  watchlistData: defineTable({
+    ticker: v.string(),
+    name: v.optional(v.string()),
+    marketCap: v.optional(v.string()),
+    price: v.optional(v.float64()),
+    change: v.optional(v.float64()),
+    changePct: v.optional(v.float64()),
+    high52w: v.optional(v.float64()),
+    low52w: v.optional(v.float64()),
+    pctInRange: v.optional(v.float64()),
+    change1m: v.optional(v.float64()),
+    change6m: v.optional(v.float64()),
+    change1y: v.optional(v.float64()),
+    change3y: v.optional(v.float64()),
+    change5y: v.optional(v.float64()),
+    sector: v.optional(v.string()),
+    lastUpdated: v.string(),
+    lastHistoryUpdate: v.optional(v.string()),
+  }).index("by_ticker", ["ticker"]),
 });

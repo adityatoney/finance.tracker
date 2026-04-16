@@ -13,6 +13,7 @@ import type * as retirement from "../retirement.js";
 import type * as snapshots from "../snapshots.js";
 import type * as statements from "../statements.js";
 import type * as tickers from "../tickers.js";
+import type * as watchlist from "../watchlist.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   snapshots: typeof snapshots;
   statements: typeof statements;
   tickers: typeof tickers;
+  watchlist: typeof watchlist;
 }>;
 
 /**
