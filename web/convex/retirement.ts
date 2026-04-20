@@ -1,11 +1,14 @@
 import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
+import { requireAuth } from "./lib/auth";
 
 export const list = query({
   args: {},
   handler: async (ctx) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     return await ctx.db
       .query("retirementStatements")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
       .collect()
       .then((rows) => rows.sort((a, b) => a.year.localeCompare(b.year)));
   },
@@ -14,7 +17,11 @@ export const list = query({
 export const getStats = query({
   args: {},
   handler: async (ctx) => {
-    const rows = await ctx.db.query("retirementStatements").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const rows = await ctx.db
+      .query("retirementStatements")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
     if (rows.length === 0) return null;
 
     const sorted = rows.sort((a, b) => a.year.localeCompare(b.year));
@@ -35,7 +42,6 @@ export const getStats = query({
     , rows[0]);
 
     // Average annual return (modified Dietz, geometric mean)
-    // Each year's return = marketGain / (beginningBalance + totalContributions * 0.5)
     let geoProduct = 1;
     let validYears = 0;
     for (const r of sorted) {
@@ -86,6 +92,8 @@ export const commit = mutation({
     fileHash: v.string(),
   },
   handler: async (ctx, args) => {
+    const { dataSpaceId } = await requireAuth(ctx);
+
     // Dedup by fileHash
     if (args.fileHash) {
       const existing = await ctx.db
@@ -95,14 +103,19 @@ export const commit = mutation({
       if (existing) throw new Error("This annual statement has already been uploaded.");
     }
 
-    // Also check for duplicate year
+    // Also check for duplicate year within this data space
     const existingYear = await ctx.db
       .query("retirementStatements")
-      .withIndex("by_year", (q) => q.eq("year", args.year))
+      .withIndex("by_dataSpace_year", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("year", args.year)
+      )
       .first();
     if (existingYear) throw new Error(`A statement for year ${args.year} already exists. Delete it first to re-upload.`);
 
-    const id = await ctx.db.insert("retirementStatements", args);
+    const id = await ctx.db.insert("retirementStatements", {
+      ...args,
+      dataSpaceId,
+    });
     return { id, year: args.year };
   },
 });
@@ -110,8 +123,10 @@ export const commit = mutation({
 export const remove = mutation({
   args: { id: v.id("retirementStatements") },
   handler: async (ctx, { id }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const row = await ctx.db.get(id);
     if (!row) throw new Error("Statement not found");
+    if (row.dataSpaceId !== dataSpaceId) throw new Error("Not authorized");
     await ctx.db.delete(id);
     return { deleted: id, year: row.year };
   },

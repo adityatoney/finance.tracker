@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { ConvexClientProvider } from "@/providers/convex-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthGuard } from "@/components/auth/auth-guard";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -36,12 +37,14 @@ export default function RootLayout({
         <ThemeProvider>
           <ConvexClientProvider>
             <TooltipProvider>
-              <div className="flex h-full">
-                <Sidebar />
-                <main className="flex-1 overflow-auto bg-background">
-                  <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
-                </main>
-              </div>
+              <AuthGuard>
+                <div className="flex h-full">
+                  <Sidebar />
+                  <main className="flex-1 overflow-auto bg-background">
+                    <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
+                  </main>
+                </div>
+              </AuthGuard>
             </TooltipProvider>
           </ConvexClientProvider>
         </ThemeProvider>

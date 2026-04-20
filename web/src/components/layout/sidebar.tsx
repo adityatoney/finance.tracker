@@ -16,9 +16,10 @@ import {
   Sun,
   Moon,
   Monitor,
-  ExternalLink,
+  Users,
 } from "lucide-react";
 import { useTheme } from "next-themes";
+import { UserButton } from "@clerk/nextjs";
 
 const navGroups = [
   {
@@ -40,6 +41,7 @@ const navGroups = [
   {
     label: "Administration",
     items: [
+      { href: "/users", label: "Users", icon: Users },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
@@ -114,11 +116,16 @@ export function Sidebar() {
           <span>{themeLabel}</span>
         </button>
         <div className="flex items-center gap-3 rounded-md px-3 py-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[10px] font-bold text-primary">
-            AT
-          </div>
-          <span className="text-sm text-muted-foreground truncate flex-1">Aditya Toney</span>
-          <ExternalLink className="h-3 w-3 text-muted-foreground/40" />
+          <UserButton
+            showName
+            appearance={{
+              elements: {
+                avatarBox: "h-6 w-6",
+                userButtonBox: "flex-row-reverse",
+                userButtonOuterIdentifier: "text-sm text-muted-foreground",
+              },
+            }}
+          />
         </div>
       </div>
     </aside>

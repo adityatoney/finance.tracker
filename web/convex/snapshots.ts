@@ -1,10 +1,15 @@
 import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
+import { requireAuth } from "./lib/auth";
 
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db.query("monthlySnapshots").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    return await ctx.db
+      .query("monthlySnapshots")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
   },
 });
 
@@ -12,8 +17,15 @@ export const list = query({
 export const validateTotals = query({
   args: {},
   handler: async (ctx) => {
-    const stmts = await ctx.db.query("statements").collect();
-    const snapshots = await ctx.db.query("monthlySnapshots").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .collect();
+    const snapshots = await ctx.db
+      .query("monthlySnapshots")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
 
     const months = [...new Set(stmts.map((s) => s.statementDate))].sort();
     const results: Array<{
@@ -63,8 +75,15 @@ export const validateTotals = query({
 export const depositsByMonth = query({
   args: {},
   handler: async (ctx) => {
-    const allDeposits = await ctx.db.query("deposits").collect();
-    const stmts = await ctx.db.query("statements").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const allDeposits = await ctx.db
+      .query("deposits")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .collect();
 
     // Map statementId → month
     const stmtMonthMap = new Map<string, string>();
@@ -90,9 +109,12 @@ export const depositsByMonth = query({
 export const listForMonth = query({
   args: { month: v.string() },
   handler: async (ctx, { month }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     return await ctx.db
       .query("monthlySnapshots")
-      .withIndex("by_month", (q) => q.eq("month", month))
+      .withIndex("by_dataSpace_month", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("month", month)
+      )
       .collect();
   },
 });
@@ -101,6 +123,7 @@ export const listForMonth = query({
 export const rebuildMonth = mutation({
   args: { month: v.string() },
   handler: async (ctx, { month }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const CATEGORIES = ["foundational", "value", "growth", "emergency_fund", "btc_crypto"];
 
     function prevMonth(m: string): string {
@@ -109,16 +132,20 @@ export const rebuildMonth = mutation({
       return `${y}-${String(mo - 1).padStart(2, "0")}`;
     }
 
-    // Get statements for this month
+    // Get statements for this month in this data space
     const stmts = await ctx.db
       .query("statements")
-      .withIndex("by_date", (q) => q.eq("statementDate", month))
+      .withIndex("by_dataSpace_date", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("statementDate", month)
+      )
       .collect();
 
-    // Delete existing snapshots for this month
+    // Delete existing snapshots for this month + data space
     const existing = await ctx.db
       .query("monthlySnapshots")
-      .withIndex("by_month", (q) => q.eq("month", month))
+      .withIndex("by_dataSpace_month", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("month", month)
+      )
       .collect();
     for (const s of existing) await ctx.db.delete(s._id);
 
@@ -148,7 +175,6 @@ export const rebuildMonth = mutation({
         .query("deposits")
         .withIndex("by_statement", (q) => q.eq("statementId", stmt._id))
         .collect();
-      // Only count YOUR contributions — exclude employer contributions
       totalDeposits += deposits
         .filter((d) => !(d.description || "").toLowerCase().includes("employer"))
         .reduce((s, d) => s + d.amount, 0);
@@ -161,7 +187,9 @@ export const rebuildMonth = mutation({
     const prevSnapshots: Record<string, number> = {};
     const prevRows = await ctx.db
       .query("monthlySnapshots")
-      .withIndex("by_month", (q) => q.eq("month", prev))
+      .withIndex("by_dataSpace_month", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("month", prev)
+      )
       .collect();
     for (const s of prevRows) prevSnapshots[s.category] = s.totalValue;
 
@@ -180,6 +208,7 @@ export const rebuildMonth = mutation({
         totalValue: currentValue,
         netDeposits: catDeposits,
         marketGain,
+        dataSpaceId,
       });
     }
 
@@ -191,6 +220,7 @@ export const rebuildMonth = mutation({
 export const rebuildAll = mutation({
   args: {},
   handler: async (ctx) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const CATEGORIES = ["foundational", "value", "growth", "emergency_fund", "btc_crypto"];
 
     function prevMonthStr(m: string): string {
@@ -200,12 +230,18 @@ export const rebuildAll = mutation({
     }
 
     // Get all unique months from statements, sorted chronologically
-    const stmts = await ctx.db.query("statements").collect();
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .collect();
     const months = [...new Set(stmts.map((s) => s.statementDate))].sort();
 
     if (months.length === 0) {
-      // Delete all snapshots
-      const all = await ctx.db.query("monthlySnapshots").collect();
+      // Delete all snapshots for this data space
+      const all = await ctx.db
+        .query("monthlySnapshots")
+        .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+        .collect();
       for (const s of all) await ctx.db.delete(s._id);
       return { monthsRebuilt: 0 };
     }
@@ -251,14 +287,18 @@ export const rebuildAll = mutation({
       const prevSnapshots: Record<string, number> = {};
       const prevRows = await ctx.db
         .query("monthlySnapshots")
-        .withIndex("by_month", (q) => q.eq("month", prev))
+        .withIndex("by_dataSpace_month", (q) =>
+          q.eq("dataSpaceId", dataSpaceId).eq("month", prev)
+        )
         .collect();
       for (const s of prevRows) prevSnapshots[s.category] = s.totalValue;
 
       // Delete existing snapshots for this month
       const existing = await ctx.db
         .query("monthlySnapshots")
-        .withIndex("by_month", (q) => q.eq("month", month))
+        .withIndex("by_dataSpace_month", (q) =>
+          q.eq("dataSpaceId", dataSpaceId).eq("month", month)
+        )
         .collect();
       for (const s of existing) await ctx.db.delete(s._id);
 
@@ -277,6 +317,7 @@ export const rebuildAll = mutation({
           totalValue: currentValue,
           netDeposits: catDeposits,
           marketGain,
+          dataSpaceId,
         });
       }
     }

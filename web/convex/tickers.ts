@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
+import { requireAuth } from "./lib/auth";
 
 // Default ticker mappings — seeded on first access if table is empty
 const DEFAULT_TICKERS: Record<string, string> = {
@@ -23,7 +24,11 @@ const DEFAULT_TICKERS: Record<string, string> = {
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const mappings = await ctx.db.query("tickerMap").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const mappings = await ctx.db
+      .query("tickerMap")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
     return mappings.sort((a, b) => a.ticker.localeCompare(b.ticker));
   },
 });
@@ -31,9 +36,12 @@ export const list = query({
 export const getCategory = query({
   args: { ticker: v.string() },
   handler: async (ctx, { ticker }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const mapping = await ctx.db
       .query("tickerMap")
-      .withIndex("by_ticker", (q) => q.eq("ticker", ticker.toUpperCase()))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", ticker.toUpperCase())
+      )
       .first();
     return mapping;
   },
@@ -42,10 +50,13 @@ export const getCategory = query({
 export const upsert = mutation({
   args: { ticker: v.string(), category: v.string(), source: v.optional(v.string()) },
   handler: async (ctx, { ticker, category, source }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const tickerUpper = ticker.toUpperCase().trim();
     const existing = await ctx.db
       .query("tickerMap")
-      .withIndex("by_ticker", (q) => q.eq("ticker", tickerUpper))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", tickerUpper)
+      )
       .first();
 
     if (existing) {
@@ -56,6 +67,7 @@ export const upsert = mutation({
         ticker: tickerUpper,
         category,
         source: source ?? "user",
+        dataSpaceId,
       });
     }
   },
@@ -64,9 +76,12 @@ export const upsert = mutation({
 export const remove = mutation({
   args: { ticker: v.string() },
   handler: async (ctx, { ticker }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const existing = await ctx.db
       .query("tickerMap")
-      .withIndex("by_ticker", (q) => q.eq("ticker", ticker.toUpperCase()))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", ticker.toUpperCase())
+      )
       .first();
     if (existing) {
       await ctx.db.delete(existing._id);
@@ -74,16 +89,20 @@ export const remove = mutation({
   },
 });
 
-// Seed default tickers if the table is empty
+// Seed default tickers if the data space has none
 export const seedDefaults = mutation({
   args: {},
   handler: async (ctx) => {
-    const count = (await ctx.db.query("tickerMap").collect()).length;
-    if (count > 0) return { seeded: 0 };
+    const { dataSpaceId } = await requireAuth(ctx);
+    const existing = await ctx.db
+      .query("tickerMap")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
+    if (existing.length > 0) return { seeded: 0 };
 
     let seeded = 0;
     for (const [ticker, category] of Object.entries(DEFAULT_TICKERS)) {
-      await ctx.db.insert("tickerMap", { ticker, category, source: "seed" });
+      await ctx.db.insert("tickerMap", { ticker, category, source: "seed", dataSpaceId });
       seeded++;
     }
     return { seeded };
@@ -94,11 +113,14 @@ export const seedDefaults = mutation({
 export const resolveCategories = query({
   args: { tickers: v.array(v.string()) },
   handler: async (ctx, { tickers }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const result: Record<string, { category: string; source: string } | null> = {};
     for (const ticker of tickers) {
       const mapping = await ctx.db
         .query("tickerMap")
-        .withIndex("by_ticker", (q) => q.eq("ticker", ticker.toUpperCase()))
+        .withIndex("by_dataSpace_ticker", (q) =>
+          q.eq("dataSpaceId", dataSpaceId).eq("ticker", ticker.toUpperCase())
+        )
         .first();
       result[ticker] = mapping ? { category: mapping.category, source: mapping.source } : null;
     }

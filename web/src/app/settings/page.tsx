@@ -7,7 +7,17 @@ import { Badge } from "@/components/ui/badge";
 import { SectionHeader } from "@/components/layout/section-header";
 import { StatementList } from "@/components/settings/statement-list";
 import { Button } from "@/components/ui/button";
-import { Settings, Shield, Database, FileText, Wallet, Tags, Calendar, RefreshCw, Loader2 } from "lucide-react";
+import {
+  Settings,
+  Shield,
+  Database,
+  FileText,
+  Wallet,
+  Tags,
+  Calendar,
+  RefreshCw,
+  Loader2,
+} from "lucide-react";
 import { useState } from "react";
 
 function SettingsSkeleton() {
@@ -37,6 +47,7 @@ export default function SettingsPage() {
   const removeStatement = useMutation(api.statements.remove);
   const rebuildAll = useMutation(api.snapshots.rebuildAll);
   const validation = useQuery(api.snapshots.validateTotals);
+
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [rebuildResult, setRebuildResult] = useState<string | null>(null);
 
@@ -116,7 +127,6 @@ export default function SettingsPage() {
           )}
         </SectionHeader>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {/* Statements count */}
           <Card>
             <CardContent className="relative pt-6">
               <FileText className="absolute right-4 top-4 h-5 w-5 text-muted-foreground/40" />
@@ -126,8 +136,6 @@ export default function SettingsPage() {
               <p className="mt-1 text-2xl font-bold tabular-nums">{stats.statementCount}</p>
             </CardContent>
           </Card>
-
-          {/* Holdings count */}
           <Card>
             <CardContent className="relative pt-6">
               <Wallet className="absolute right-4 top-4 h-5 w-5 text-muted-foreground/40" />
@@ -137,8 +145,6 @@ export default function SettingsPage() {
               <p className="mt-1 text-2xl font-bold tabular-nums">{stats.holdingsCount}</p>
             </CardContent>
           </Card>
-
-          {/* Ticker Mappings count */}
           <Card>
             <CardContent className="relative pt-6">
               <Tags className="absolute right-4 top-4 h-5 w-5 text-muted-foreground/40" />
@@ -148,8 +154,6 @@ export default function SettingsPage() {
               <p className="mt-1 text-2xl font-bold tabular-nums">{stats.tickerMapCount}</p>
             </CardContent>
           </Card>
-
-          {/* Date Range */}
           <Card>
             <CardContent className="relative pt-6">
               <Calendar className="absolute right-4 top-4 h-5 w-5 text-muted-foreground/40" />
@@ -198,11 +202,11 @@ export default function SettingsPage() {
                       <td className="px-4 py-2.5 text-center">
                         {v.match ? (
                           <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 border-0 text-[10px]">
-                            ✓ Match
+                            Match
                           </Badge>
                         ) : (
                           <Badge className="bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 border-0 text-[10px]">
-                            Δ ${v.diff.toLocaleString()}
+                            ${v.diff.toLocaleString()}
                           </Badge>
                         )}
                       </td>

@@ -1,13 +1,18 @@
 import { v } from "convex/values";
-import { query, mutation, action } from "./_generated/server";
-import { api } from "./_generated/api";
+import { query, mutation, action, internalMutation, internalQuery } from "./_generated/server";
+import { api, internal } from "./_generated/api";
+import { requireAuth, requireIdentity } from "./lib/auth";
 
 // ── Queries ──
 
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const items = await ctx.db.query("watchlist").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const items = await ctx.db
+      .query("watchlist")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
     const result = [];
 
     for (const item of items) {
@@ -26,15 +31,40 @@ export const list = query({
   },
 });
 
+// Internal query for use by actions (no auth check — caller validates)
+export const listInternal = internalQuery({
+  args: { dataSpaceId: v.string() },
+  handler: async (ctx, { dataSpaceId }) => {
+    const items = await ctx.db
+      .query("watchlist")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
+    const result = [];
+
+    for (const item of items) {
+      const data = await ctx.db
+        .query("watchlistData")
+        .withIndex("by_ticker", (q) => q.eq("ticker", item.ticker))
+        .first();
+      result.push({ ...item, data: data ?? null });
+    }
+
+    return result;
+  },
+});
+
 // ── Mutations ──
 
 export const add = mutation({
   args: { ticker: v.string(), notes: v.optional(v.string()) },
   handler: async (ctx, { ticker, notes }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const upper = ticker.toUpperCase().trim();
     const existing = await ctx.db
       .query("watchlist")
-      .withIndex("by_ticker", (q) => q.eq("ticker", upper))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", upper)
+      )
       .first();
 
     if (existing) throw new Error(`${upper} is already in your watchlist`);
@@ -43,6 +73,7 @@ export const add = mutation({
       ticker: upper,
       addedAt: new Date().toISOString(),
       notes,
+      dataSpaceId,
     });
   },
 });
@@ -50,11 +81,14 @@ export const add = mutation({
 export const remove = mutation({
   args: { ticker: v.string() },
   handler: async (ctx, { ticker }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const upper = ticker.toUpperCase().trim();
 
     const item = await ctx.db
       .query("watchlist")
-      .withIndex("by_ticker", (q) => q.eq("ticker", upper))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", upper)
+      )
       .first();
     if (item) await ctx.db.delete(item._id);
 
@@ -69,16 +103,19 @@ export const remove = mutation({
 export const updateNote = mutation({
   args: { ticker: v.string(), notes: v.string() },
   handler: async (ctx, { ticker, notes }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const item = await ctx.db
       .query("watchlist")
-      .withIndex("by_ticker", (q) => q.eq("ticker", ticker.toUpperCase()))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", ticker.toUpperCase())
+      )
       .first();
     if (item) await ctx.db.patch(item._id, { notes });
   },
 });
 
-// Internal mutation to upsert watchlist data
-export const upsertData = mutation({
+// Internal mutation for upsertData — called by actions (no auth propagation)
+export const upsertDataInternal = internalMutation({
   args: {
     ticker: v.string(),
     name: v.optional(v.string()),
@@ -118,25 +155,18 @@ export const upsertData = mutation({
   },
 });
 
-// ── Actions (Yahoo Finance — daily data, matches Google Finance exactly) ──
+// ── Actions (Yahoo Finance) ──
 
 /**
  * Refresh a single ticker from Yahoo Finance.
- *
- * Uses daily interval over 5Y range to get exact close prices from
- * 30/183/365/1095/1825 days ago — matches GOOGLEFINANCE() methodology.
- * Uses unadjusted close prices (same as Google Finance).
- *
- * No API key needed. No rate limits for reasonable usage.
  */
 export const refreshTicker = action({
   args: { ticker: v.string() },
   handler: async (ctx, { ticker }) => {
+    // Auth check for actions
+    await requireIdentity(ctx);
+
     const upper = ticker.toUpperCase().trim();
-    // Normalize for Yahoo:
-    //   NYSE:BRK.B → BRK-B (strip exchange prefix, replace . with -)
-    //   NYSE:TSM → TSM (strip exchange prefix)
-    //   BRK.B → BRK-B (replace . with -)
     let yahooTicker = upper.includes(":") ? upper.split(":").pop()! : upper;
     yahooTicker = yahooTicker.replace(".", "-");
     const now = new Date().toISOString();
@@ -195,12 +225,10 @@ export const refreshTicker = action({
       return ((price - past) / past) * 100;
     };
 
-    // Daily change: current price vs PREVIOUS TRADING DAY close
-    // Use the second-to-last data point (last is today/current, second-to-last is prev close)
+    // Daily change
     let change: number | undefined;
     let changePct: number | undefined;
     if (closes.length >= 2) {
-      // Walk backwards to find the last two valid closes
       let currentClose: number | undefined;
       let prevClose: number | undefined;
       for (let i = closes.length - 1; i >= 0; i--) {
@@ -213,22 +241,20 @@ export const refreshTicker = action({
           }
         }
       }
-      // Use regularMarketPrice (real-time) vs previous trading day close
       if (prevClose && prevClose > 0) {
         change = price - prevClose;
         changePct = (change / prevClose) * 100;
       }
     }
 
-    // Historical % changes — exact calendar day matching
     const change1m = pctChange(30);
     const change6m = pctChange(183);
     const change1y = pctChange(365);
     const change3y = pctChange(1095);
     const change5y = pctChange(1825);
 
-    // Save to Convex
-    await ctx.runMutation(api.watchlist.upsertData, {
+    // Save via internal mutation (no auth propagation needed)
+    await ctx.runMutation(internal.watchlist.upsertDataInternal, {
       ticker: upper,
       name,
       price,
@@ -252,12 +278,22 @@ export const refreshTicker = action({
 
 /**
  * Refresh ALL watchlist tickers from Yahoo Finance.
- * No rate limits — just a small politeness delay between requests.
  */
 export const refreshAll = action({
   args: {},
   handler: async (ctx): Promise<{ updated: number; errors: number; timestamp: string }> => {
-    const items = await ctx.runQuery(api.watchlist.list, {});
+    // Auth check — get user's dataSpaceId via identity lookup
+    const identity = await requireIdentity(ctx);
+
+    // Use internal query to get the user's watchlist
+    const user = await ctx.runQuery(internal.users.getUserByAuthId, {
+      authId: identity.subject,
+    });
+    if (!user) throw new Error("Unauthorized");
+
+    const items = await ctx.runQuery(internal.watchlist.listInternal, {
+      dataSpaceId: user.dataSpaceId,
+    });
 
     let updated = 0;
     let errors = 0;

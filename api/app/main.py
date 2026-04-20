@@ -13,12 +13,15 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# CORS: allow any localhost origin (parser is stateless, no sensitive data)
+# CORS: restrict to known app origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:10614",  # Next.js dev
+        "http://localhost:10613",  # Next.js prod (Docker)
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["POST"],
     allow_headers=["*"],
 )
 

@@ -1,9 +1,16 @@
 import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
+import { requireAuth } from "./lib/auth";
 
 export const listByStatement = query({
   args: { statementId: v.id("statements") },
   handler: async (ctx, { statementId }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
+
+    // Verify statement belongs to this data space
+    const stmt = await ctx.db.get(statementId);
+    if (!stmt || stmt.dataSpaceId !== dataSpaceId) return [];
+
     return await ctx.db
       .query("holdings")
       .withIndex("by_statement", (q) => q.eq("statementId", statementId))
@@ -14,10 +21,14 @@ export const listByStatement = query({
 export const listForMonth = query({
   args: { month: v.string() },
   handler: async (ctx, { month }) => {
-    // Get statement IDs for this month
+    const { dataSpaceId } = await requireAuth(ctx);
+
+    // Get statement IDs for this month in this data space
     const stmts = await ctx.db
       .query("statements")
-      .withIndex("by_date", (q) => q.eq("statementDate", month))
+      .withIndex("by_dataSpace_date", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("statementDate", month)
+      )
       .collect();
 
     if (stmts.length === 0) return [];
@@ -44,15 +55,24 @@ export const listForMonth = query({
 export const getLatestMonth = query({
   args: {},
   handler: async (ctx) => {
-    const stmt = await ctx.db.query("statements").order("desc").first();
-    return stmt?.statementDate ?? null;
+    const { dataSpaceId } = await requireAuth(ctx);
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .order("desc")
+      .collect();
+    return stmts[0]?.statementDate ?? null;
   },
 });
 
 export const getAllMonths = query({
   args: {},
   handler: async (ctx) => {
-    const stmts = await ctx.db.query("statements").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .collect();
     const months = [...new Set(stmts.map((s) => s.statementDate))].sort().reverse();
     return months;
   },
@@ -62,55 +82,57 @@ export const getAllMonths = query({
 export const updateCategory = mutation({
   args: { holdingId: v.id("holdings"), category: v.string() },
   handler: async (ctx, { holdingId, category }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const holding = await ctx.db.get(holdingId);
     if (!holding) throw new Error("Holding not found");
+    if (holding.dataSpaceId !== dataSpaceId) throw new Error("Not authorized");
 
     await ctx.db.patch(holdingId, { category });
 
-    // Rebuild snapshots for the affected month
     const stmt = await ctx.db.get(holding.statementId);
-    if (stmt) {
-      // Import inline to avoid circular deps
-      const snapshots = await ctx.db
-        .query("monthlySnapshots")
-        .withIndex("by_month", (q) => q.eq("month", stmt.statementDate))
-        .collect();
-      // We'll let the client call rebuildMonth separately if needed
-    }
-
     return { updated: true, month: stmt?.statementDate };
   },
 });
 
-// Recategorize a ticker across all holdings
+// Recategorize a ticker across all holdings in this data space
 export const recategorize = mutation({
   args: { ticker: v.string(), category: v.string() },
   handler: async (ctx, { ticker, category }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const tickerUpper = ticker.toUpperCase();
 
-    // Update the ticker map
+    // Update the ticker map for this data space
     const existing = await ctx.db
       .query("tickerMap")
-      .withIndex("by_ticker", (q) => q.eq("ticker", tickerUpper))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", tickerUpper)
+      )
       .first();
 
     if (existing) {
       await ctx.db.patch(existing._id, { category, source: "user" });
     } else {
-      await ctx.db.insert("tickerMap", { ticker: tickerUpper, category, source: "user" });
+      await ctx.db.insert("tickerMap", {
+        ticker: tickerUpper,
+        category,
+        source: "user",
+        dataSpaceId,
+      });
     }
 
-    // Update all holdings with this ticker
+    // Update all holdings with this ticker in this data space
     const holdings = await ctx.db
       .query("holdings")
-      .withIndex("by_ticker", (q) => q.eq("ticker", tickerUpper))
+      .withIndex("by_dataSpace_ticker", (q) =>
+        q.eq("dataSpaceId", dataSpaceId).eq("ticker", tickerUpper)
+      )
       .collect();
 
     for (const h of holdings) {
       await ctx.db.patch(h._id, { category });
     }
 
-    // Rebuild snapshots for all affected months
+    // Return affected months so the client can trigger rebuilds
     const affectedStmtIds = [...new Set(holdings.map((h) => h.statementId))];
     const affectedMonths = new Set<string>();
     for (const stmtId of affectedStmtIds) {
@@ -118,8 +140,6 @@ export const recategorize = mutation({
       if (stmt) affectedMonths.add(stmt.statementDate);
     }
 
-    // Note: snapshot rebuild happens via the rebuildMonth mutation called separately
-    // Return the affected months so the client can trigger rebuilds
     return { updated: holdings.length, affectedMonths: [...affectedMonths] };
   },
 });

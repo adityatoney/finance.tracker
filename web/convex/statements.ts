@@ -1,6 +1,6 @@
 import { v } from "convex/values";
-import { query, mutation, internalAction } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { query, mutation } from "./_generated/server";
+import { requireAuth } from "./lib/auth";
 
 // ── PII Encryption (AES-256-GCM via Web Crypto API) ──
 // Key from environment variable, set in Convex dashboard
@@ -41,16 +41,6 @@ async function encrypt(plaintext: string): Promise<string> {
   return toBase64(combined);
 }
 
-async function decrypt(ciphertext: string): Promise<string> {
-  if (!ciphertext || !ENCRYPTION_KEY) return "";
-  const key = await getKey();
-  const buf = fromBase64(ciphertext);
-  const iv = buf.slice(0, 12);
-  const encrypted = buf.slice(12);
-  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
-  return new TextDecoder().decode(decrypted);
-}
-
 function maskAccountNumber(acct: string): string {
   if (!acct || acct.length <= 4) return acct;
   return "***-" + acct.slice(-4);
@@ -61,7 +51,12 @@ function maskAccountNumber(acct: string): string {
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const stmts = await ctx.db.query("statements").order("desc").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .order("desc")
+      .collect();
     return stmts.map((s) => ({
       ...s,
       // Never send encrypted PII to the client in list view
@@ -74,8 +69,9 @@ export const list = query({
 export const getById = query({
   args: { id: v.id("statements") },
   handler: async (ctx, { id }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const stmt = await ctx.db.get(id);
-    if (!stmt) return null;
+    if (!stmt || stmt.dataSpaceId !== dataSpaceId) return null;
     return {
       ...stmt,
       accountNumberEnc: undefined,
@@ -87,9 +83,19 @@ export const getById = query({
 export const getStats = query({
   args: {},
   handler: async (ctx) => {
-    const stmts = await ctx.db.query("statements").collect();
-    const holdings = await ctx.db.query("holdings").collect();
-    const tickers = await ctx.db.query("tickerMap").collect();
+    const { dataSpaceId } = await requireAuth(ctx);
+    const stmts = await ctx.db
+      .query("statements")
+      .withIndex("by_dataSpace_date", (q) => q.eq("dataSpaceId", dataSpaceId))
+      .collect();
+    const holdings = await ctx.db
+      .query("holdings")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
+    const tickers = await ctx.db
+      .query("tickerMap")
+      .filter((q) => q.eq(q.field("dataSpaceId"), dataSpaceId))
+      .collect();
 
     const dates = stmts.map((s) => s.statementDate).sort();
 
@@ -150,6 +156,8 @@ export const commit = mutation({
     ),
   },
   handler: async (ctx, args) => {
+    const { dataSpaceId } = await requireAuth(ctx);
+
     // Check for duplicate
     if (args.fileHash) {
       const existing = await ctx.db
@@ -165,7 +173,9 @@ export const commit = mutation({
       const tickerUpper = override.ticker.toUpperCase();
       const existing = await ctx.db
         .query("tickerMap")
-        .withIndex("by_ticker", (q) => q.eq("ticker", tickerUpper))
+        .withIndex("by_dataSpace_ticker", (q) =>
+          q.eq("dataSpaceId", dataSpaceId).eq("ticker", tickerUpper)
+        )
         .first();
       if (existing) {
         await ctx.db.patch(existing._id, { category: override.category, source: "user" });
@@ -174,6 +184,7 @@ export const commit = mutation({
           ticker: tickerUpper,
           category: override.category,
           source: "user",
+          dataSpaceId,
         });
       }
       tickerMappingsAdded++;
@@ -204,6 +215,7 @@ export const commit = mutation({
       ownerNameEnc,
       totalValue,
       netDeposits: totalDeposits,
+      dataSpaceId,
       accounts: args.accounts.map((a) => ({
         accountNumber: a.account_number,
         accountNumberMasked: a.account_number_masked,
@@ -223,6 +235,7 @@ export const commit = mutation({
         fieldName: "account_number",
         piiType: "account_number",
         action: "encrypted",
+        dataSpaceId,
       });
     }
 
@@ -243,6 +256,7 @@ export const commit = mutation({
           category: account.aggregate_category || "uncategorized",
           brokerage: args.brokerage,
           accountNumber: account.account_number,
+          dataSpaceId,
         });
         holdingsCreated++;
       } else {
@@ -252,7 +266,9 @@ export const commit = mutation({
           if (!category) {
             const mapping = await ctx.db
               .query("tickerMap")
-              .withIndex("by_ticker", (q) => q.eq("ticker", h.ticker.toUpperCase()))
+              .withIndex("by_dataSpace_ticker", (q) =>
+                q.eq("dataSpaceId", dataSpaceId).eq("ticker", h.ticker.toUpperCase())
+              )
               .first();
             category = mapping?.category ?? "uncategorized";
           }
@@ -270,6 +286,7 @@ export const commit = mutation({
             category,
             brokerage: args.brokerage,
             accountNumber: account.account_number,
+            dataSpaceId,
           });
           holdingsCreated++;
         }
@@ -284,12 +301,13 @@ export const commit = mutation({
         amount: d.amount,
         description: d.description ?? "",
         date: d.date,
+        dataSpaceId,
       });
       depositsCreated++;
     }
 
     // Rebuild snapshots for the affected month
-    await rebuildMonthInternal(ctx, args.statementDate);
+    await rebuildMonthInternal(ctx, args.statementDate, dataSpaceId);
 
     return {
       statementId,
@@ -304,8 +322,10 @@ export const commit = mutation({
 export const remove = mutation({
   args: { statementId: v.id("statements") },
   handler: async (ctx, { statementId }) => {
+    const { dataSpaceId } = await requireAuth(ctx);
     const stmt = await ctx.db.get(statementId);
     if (!stmt) throw new Error("Statement not found");
+    if (stmt.dataSpaceId !== dataSpaceId) throw new Error("Not authorized");
 
     const month = stmt.statementDate;
 
@@ -331,7 +351,7 @@ export const remove = mutation({
     await ctx.db.delete(statementId);
 
     // Rebuild snapshots
-    await rebuildMonthInternal(ctx, month);
+    await rebuildMonthInternal(ctx, month, dataSpaceId);
 
     return { deleted: statementId, monthRebuilt: month };
   },
@@ -347,24 +367,25 @@ function prevMonth(month: string): string {
   return `${y}-${String(m - 1).padStart(2, "0")}`;
 }
 
-async function rebuildMonthInternal(ctx: any, month: string) {
-  // Get all statement IDs for this month
+async function rebuildMonthInternal(ctx: any, month: string, dataSpaceId: string) {
+  // Get all statement IDs for this month in this data space
   const stmts = await ctx.db
     .query("statements")
-    .withIndex("by_date", (q: any) => q.eq("statementDate", month))
+    .withIndex("by_dataSpace_date", (q: any) =>
+      q.eq("dataSpaceId", dataSpaceId).eq("statementDate", month)
+    )
     .collect();
 
-  if (stmts.length === 0) {
-    // Delete existing snapshots for this month
-    const existing = await ctx.db
-      .query("monthlySnapshots")
-      .withIndex("by_month", (q: any) => q.eq("month", month))
-      .collect();
-    for (const s of existing) await ctx.db.delete(s._id);
-    return;
-  }
+  // Delete existing snapshots for this month + data space
+  const existing = await ctx.db
+    .query("monthlySnapshots")
+    .withIndex("by_dataSpace_month", (q: any) =>
+      q.eq("dataSpaceId", dataSpaceId).eq("month", month)
+    )
+    .collect();
+  for (const s of existing) await ctx.db.delete(s._id);
 
-  const stmtIds = new Set(stmts.map((s: any) => s._id));
+  if (stmts.length === 0) return;
 
   // Get all holdings for these statements
   const allHoldings = [];
@@ -403,18 +424,13 @@ async function rebuildMonthInternal(ctx: any, month: string) {
   const prevSnapshots: Record<string, number> = {};
   const prevRows = await ctx.db
     .query("monthlySnapshots")
-    .withIndex("by_month", (q: any) => q.eq("month", prev))
+    .withIndex("by_dataSpace_month", (q: any) =>
+      q.eq("dataSpaceId", dataSpaceId).eq("month", prev)
+    )
     .collect();
   for (const s of prevRows) prevSnapshots[s.category] = s.totalValue;
 
-  // Delete existing snapshots for this month
-  const existingSnapshots = await ctx.db
-    .query("monthlySnapshots")
-    .withIndex("by_month", (q: any) => q.eq("month", month))
-    .collect();
-  for (const s of existingSnapshots) await ctx.db.delete(s._id);
-
-  // Create new snapshots — include ALL categories that have holdings (not just the 5 standard ones)
+  // Create new snapshots — include ALL categories that have holdings
   const allCategories = new Set([...CATEGORIES, ...Object.keys(categoryTotals)]);
   for (const category of allCategories) {
     const currentValue = categoryTotals[category] ?? 0;
@@ -429,6 +445,7 @@ async function rebuildMonthInternal(ctx: any, month: string) {
       totalValue: currentValue,
       netDeposits: catDeposits,
       marketGain,
+      dataSpaceId,
     });
   }
 }

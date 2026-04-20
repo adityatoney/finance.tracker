@@ -9,10 +9,12 @@
  */
 
 import type * as holdings from "../holdings.js";
+import type * as lib_auth from "../lib/auth.js";
 import type * as retirement from "../retirement.js";
 import type * as snapshots from "../snapshots.js";
 import type * as statements from "../statements.js";
 import type * as tickers from "../tickers.js";
+import type * as users from "../users.js";
 import type * as watchlist from "../watchlist.js";
 
 import type {
@@ -23,10 +25,12 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   holdings: typeof holdings;
+  "lib/auth": typeof lib_auth;
   retirement: typeof retirement;
   snapshots: typeof snapshots;
   statements: typeof statements;
   tickers: typeof tickers;
+  users: typeof users;
   watchlist: typeof watchlist;
 }>;
 

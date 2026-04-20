@@ -2,6 +2,31 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  // ── Auth & Multi-Tenancy ──
+  authorizedUsers: defineTable({
+    authId: v.string(), // Auth0 subject (e.g., "google-oauth2|123")
+    email: v.string(),
+    name: v.string(),
+    picture: v.optional(v.string()),
+    role: v.string(), // "owner" | "member"
+    dataSpaceId: v.string(), // UUID — shared or isolated
+    invitedBy: v.optional(v.string()), // authId of inviter
+  })
+    .index("by_authId", ["authId"])
+    .index("by_dataSpace", ["dataSpaceId"])
+    .index("by_email", ["email"]),
+
+  invites: defineTable({
+    token: v.string(), // UUID
+    createdBy: v.string(), // authId of creator
+    accessType: v.string(), // "shared" | "isolated"
+    dataSpaceId: v.string(), // inviter's dataSpaceId (used for "shared")
+    expiresAt: v.string(), // ISO date
+    status: v.string(), // "pending" | "used" | "revoked"
+    usedByEmail: v.optional(v.string()),
+  }).index("by_token", ["token"]),
+
+  // ── Financial Data ──
   statements: defineTable({
     brokerage: v.string(),
     statementDate: v.string(), // YYYY-MM
@@ -11,6 +36,7 @@ export default defineSchema({
     ownerNameEnc: v.string(), // AES-256-GCM encrypted
     totalValue: v.float64(),
     netDeposits: v.float64(),
+    dataSpaceId: v.optional(v.string()),
     // Per-account breakdown stored as JSON array
     accounts: v.optional(
       v.array(
@@ -28,7 +54,8 @@ export default defineSchema({
     ),
   })
     .index("by_date", ["statementDate"])
-    .index("by_hash", ["fileHash"]),
+    .index("by_hash", ["fileHash"])
+    .index("by_dataSpace_date", ["dataSpaceId", "statementDate"]),
 
   holdings: defineTable({
     statementId: v.id("statements"),
@@ -43,23 +70,29 @@ export default defineSchema({
     category: v.string(),
     brokerage: v.optional(v.string()), // denormalized for fast queries
     accountNumber: v.optional(v.string()), // which account this belongs to
+    dataSpaceId: v.optional(v.string()),
   })
     .index("by_statement", ["statementId"])
     .index("by_ticker", ["ticker"])
-    .index("by_category", ["category"]),
+    .index("by_category", ["category"])
+    .index("by_dataSpace_ticker", ["dataSpaceId", "ticker"]),
 
   deposits: defineTable({
     statementId: v.id("statements"),
     amount: v.float64(),
     description: v.string(),
     date: v.optional(v.string()),
+    dataSpaceId: v.optional(v.string()),
   }).index("by_statement", ["statementId"]),
 
   tickerMap: defineTable({
     ticker: v.string(),
     category: v.string(), // foundational | value | growth | emergency_fund | btc_crypto
     source: v.string(), // "seed" | "user"
-  }).index("by_ticker", ["ticker"]),
+    dataSpaceId: v.optional(v.string()),
+  })
+    .index("by_ticker", ["ticker"])
+    .index("by_dataSpace_ticker", ["dataSpaceId", "ticker"]),
 
   monthlySnapshots: defineTable({
     month: v.string(), // YYYY-MM
@@ -67,15 +100,18 @@ export default defineSchema({
     totalValue: v.float64(),
     netDeposits: v.float64(),
     marketGain: v.float64(),
+    dataSpaceId: v.optional(v.string()),
   })
     .index("by_month", ["month"])
-    .index("by_month_category", ["month", "category"]),
+    .index("by_month_category", ["month", "category"])
+    .index("by_dataSpace_month", ["dataSpaceId", "month"]),
 
   piiAuditLog: defineTable({
     statementId: v.optional(v.id("statements")),
     fieldName: v.string(),
     piiType: v.string(),
     action: v.string(),
+    dataSpaceId: v.optional(v.string()),
   }),
 
   retirementStatements: defineTable({
@@ -91,16 +127,21 @@ export default defineSchema({
     periodEnd: v.string(), // "2024-12-31"
     fileName: v.string(),
     fileHash: v.string(),
+    dataSpaceId: v.optional(v.string()),
   })
     .index("by_year", ["year"])
-    .index("by_hash", ["fileHash"]),
+    .index("by_hash", ["fileHash"])
+    .index("by_dataSpace_year", ["dataSpaceId", "year"]),
 
   // ── Stock Watchlist ──
   watchlist: defineTable({
     ticker: v.string(),
     addedAt: v.string(),
     notes: v.optional(v.string()),
-  }).index("by_ticker", ["ticker"]),
+    dataSpaceId: v.optional(v.string()),
+  })
+    .index("by_ticker", ["ticker"])
+    .index("by_dataSpace_ticker", ["dataSpaceId", "ticker"]),
 
   watchlistData: defineTable({
     ticker: v.string(),
