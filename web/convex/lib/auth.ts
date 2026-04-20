@@ -1,5 +1,6 @@
 import { QueryCtx, MutationCtx, ActionCtx } from "../_generated/server";
 import { Doc } from "../_generated/dataModel";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 type AuthResult = {
   identity: { subject: string; email?: string; name?: string };
@@ -15,25 +16,29 @@ type AuthResult = {
 export async function requireAuth(
   ctx: QueryCtx | MutationCtx,
 ): Promise<AuthResult> {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity) {
+  const userId = await getAuthUserId(ctx);
+  if (!userId) {
     throw new Error("Unauthenticated: must be signed in");
   }
 
+  const authId = userId as string;
+
   const user = await ctx.db
     .query("authorizedUsers")
-    .withIndex("by_authId", (q) => q.eq("authId", identity.subject))
+    .withIndex("by_authId", (q) => q.eq("authId", authId))
     .first();
 
   if (!user) {
     throw new Error("Unauthorized: not an authorized user");
   }
 
+  const identity = await ctx.auth.getUserIdentity();
+
   return {
     identity: {
-      subject: identity.subject,
-      email: identity.email,
-      name: identity.name,
+      subject: authId,
+      email: identity?.email,
+      name: identity?.name,
     },
     user,
     dataSpaceId: user.dataSpaceId,
@@ -51,8 +56,10 @@ export async function requireIdentity(
   if (!identity) {
     throw new Error("Unauthenticated: must be signed in");
   }
+  // Convex Auth subject format: "userId|sessionId"
+  const [userId] = identity.subject.split("|");
   return {
-    subject: identity.subject,
+    subject: userId,
     email: identity.email,
     name: identity.name,
   };

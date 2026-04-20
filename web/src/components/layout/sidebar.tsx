@@ -17,9 +17,12 @@ import {
   Moon,
   Monitor,
   Users,
+  LogOut,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { UserButton } from "@clerk/nextjs";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useQuery } from "convex/react";
+import { api } from "../../../convex/_generated/api";
 
 const navGroups = [
   {
@@ -51,6 +54,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
+  const { signOut } = useAuthActions();
+  const currentUser = useQuery(api.users.currentUser);
 
   useEffect(() => setMounted(true), []);
 
@@ -115,17 +120,27 @@ export function Sidebar() {
           <ThemeIcon className="h-4 w-4 shrink-0" />
           <span>{themeLabel}</span>
         </button>
-        <div className="flex items-center gap-3 rounded-md px-3 py-2">
-          <UserButton
-            showName
-            appearance={{
-              elements: {
-                avatarBox: "h-6 w-6",
-                userButtonBox: "flex-row-reverse",
-                userButtonOuterIdentifier: "text-sm text-muted-foreground",
-              },
-            }}
-          />
+        <div className="flex w-full items-center gap-3 rounded-md px-3 py-2">
+          {currentUser?.picture ? (
+            <img
+              src={currentUser.picture}
+              alt=""
+              className="h-6 w-6 rounded-full shrink-0"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="h-6 w-6 rounded-full bg-primary/10 shrink-0" />
+          )}
+          <span className="text-sm text-muted-foreground truncate flex-1">
+            {currentUser?.name || currentUser?.email || "User"}
+          </span>
+          <button
+            onClick={() => void signOut()}
+            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            title="Sign out"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
         </div>
       </div>
     </aside>

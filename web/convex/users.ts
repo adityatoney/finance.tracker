@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { query, mutation, internalQuery } from "./_generated/server";
 import { requireAuth } from "./lib/auth";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 // ── Queries ──
 
@@ -8,15 +9,14 @@ import { requireAuth } from "./lib/auth";
 export const currentUser = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return null;
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return null;
 
-    const user = await ctx.db
+    const authId = userId as string;
+    return await ctx.db
       .query("authorizedUsers")
-      .withIndex("by_authId", (q) => q.eq("authId", identity.subject))
+      .withIndex("by_authId", (q) => q.eq("authId", authId))
       .first();
-
-    return user;
   },
 });
 
@@ -39,11 +39,9 @@ export const listUsers = query({
     const { user } = await requireAuth(ctx);
 
     if (user.role === "owner") {
-      // Owner sees all users
       return await ctx.db.query("authorizedUsers").collect();
     }
 
-    // Members only see users in their data space
     return await ctx.db
       .query("authorizedUsers")
       .withIndex("by_dataSpace", (q) => q.eq("dataSpaceId", user.dataSpaceId))
@@ -74,8 +72,11 @@ export const listInvites = query({
 export const provisionOwner = mutation({
   args: {},
   handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Unauthenticated");
+
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Unauthenticated");
+    const authId = userId as string;
 
     // Check if an owner already exists
     const existingOwner = await ctx.db
@@ -89,7 +90,7 @@ export const provisionOwner = mutation({
     // Check if this user already exists
     const existingUser = await ctx.db
       .query("authorizedUsers")
-      .withIndex("by_authId", (q) => q.eq("authId", identity.subject))
+      .withIndex("by_authId", (q) => q.eq("authId", authId))
       .first();
     if (existingUser) return existingUser;
 
@@ -97,11 +98,11 @@ export const provisionOwner = mutation({
     const dataSpaceId = crypto.randomUUID();
 
     // Create the owner record
-    const userId = await ctx.db.insert("authorizedUsers", {
-      authId: identity.subject,
-      email: identity.email ?? "",
-      name: identity.name ?? "",
-      picture: identity.pictureUrl as string | undefined,
+    const newUserId = await ctx.db.insert("authorizedUsers", {
+      authId,
+      email: identity?.email ?? "",
+      name: identity?.name ?? "",
+      picture: (identity?.pictureUrl ?? identity?.picture) as string | undefined,
       role: "owner",
       dataSpaceId,
     });
@@ -109,7 +110,7 @@ export const provisionOwner = mutation({
     // Backfill existing data with the owner's dataSpaceId
     await backfillDataSpace(ctx, dataSpaceId);
 
-    return await ctx.db.get(userId);
+    return await ctx.db.get(newUserId);
   },
 });
 
@@ -132,7 +133,7 @@ export const createInvite = mutation({
       token,
       createdBy: identity.subject,
       accessType,
-      dataSpaceId, // inviter's space — used if accessType is "shared"
+      dataSpaceId,
       expiresAt,
       status: "pending",
     });
@@ -164,19 +165,22 @@ export const revokeInvite = mutation({
   },
 });
 
-/** Accept an invite — called after the invitee authenticates via Auth0. */
+/** Accept an invite — called after the invitee authenticates. */
 export const acceptInvite = mutation({
   args: { token: v.string() },
   handler: async (ctx, { token }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Unauthenticated");
+
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Unauthenticated");
+    const authId = userId as string;
 
     // Check if already authorized
     const existingUser = await ctx.db
       .query("authorizedUsers")
-      .withIndex("by_authId", (q) => q.eq("authId", identity.subject))
+      .withIndex("by_authId", (q) => q.eq("authId", authId))
       .first();
-    if (existingUser) return existingUser; // Already authorized
+    if (existingUser) return existingUser;
 
     // Find and validate the invite
     const invite = await ctx.db
@@ -194,15 +198,15 @@ export const acceptInvite = mutation({
     // Determine the dataSpaceId
     const dataSpaceId =
       invite.accessType === "shared"
-        ? invite.dataSpaceId // Share the inviter's data space
-        : crypto.randomUUID(); // New isolated data space
+        ? invite.dataSpaceId
+        : crypto.randomUUID();
 
     // Create the user record
-    const userId = await ctx.db.insert("authorizedUsers", {
-      authId: identity.subject,
-      email: identity.email ?? "",
-      name: identity.name ?? "",
-      picture: identity.pictureUrl as string | undefined,
+    const newUserId = await ctx.db.insert("authorizedUsers", {
+      authId,
+      email: identity?.email ?? "",
+      name: identity?.name ?? "",
+      picture: (identity?.pictureUrl ?? identity?.picture) as string | undefined,
       role: "member",
       dataSpaceId,
       invitedBy: invite.createdBy,
@@ -211,7 +215,7 @@ export const acceptInvite = mutation({
     // Mark invite as used
     await ctx.db.patch(invite._id, {
       status: "used",
-      usedByEmail: identity.email ?? "",
+      usedByEmail: identity?.email ?? "",
     });
 
     // If isolated, seed default tickers for the new data space
@@ -219,7 +223,7 @@ export const acceptInvite = mutation({
       await seedTickerDefaults(ctx, dataSpaceId);
     }
 
-    return await ctx.db.get(userId);
+    return await ctx.db.get(newUserId);
   },
 });
 
@@ -292,67 +296,17 @@ async function seedTickerDefaults(ctx: any, dataSpaceId: string) {
  * Called once during provisionOwner.
  */
 async function backfillDataSpace(ctx: any, dataSpaceId: string) {
-  // Statements
-  const statements = await ctx.db.query("statements").collect();
-  for (const s of statements) {
-    if (!s.dataSpaceId) {
-      await ctx.db.patch(s._id, { dataSpaceId });
-    }
-  }
+  const tables = [
+    "statements", "holdings", "deposits", "tickerMap",
+    "monthlySnapshots", "piiAuditLog", "retirementStatements", "watchlist",
+  ] as const;
 
-  // Holdings
-  const holdings = await ctx.db.query("holdings").collect();
-  for (const h of holdings) {
-    if (!h.dataSpaceId) {
-      await ctx.db.patch(h._id, { dataSpaceId });
-    }
-  }
-
-  // Deposits
-  const deposits = await ctx.db.query("deposits").collect();
-  for (const d of deposits) {
-    if (!d.dataSpaceId) {
-      await ctx.db.patch(d._id, { dataSpaceId });
-    }
-  }
-
-  // Ticker map
-  const tickers = await ctx.db.query("tickerMap").collect();
-  for (const t of tickers) {
-    if (!t.dataSpaceId) {
-      await ctx.db.patch(t._id, { dataSpaceId });
-    }
-  }
-
-  // Monthly snapshots
-  const snapshots = await ctx.db.query("monthlySnapshots").collect();
-  for (const s of snapshots) {
-    if (!s.dataSpaceId) {
-      await ctx.db.patch(s._id, { dataSpaceId });
-    }
-  }
-
-  // PII audit log
-  const auditLogs = await ctx.db.query("piiAuditLog").collect();
-  for (const a of auditLogs) {
-    if (!a.dataSpaceId) {
-      await ctx.db.patch(a._id, { dataSpaceId });
-    }
-  }
-
-  // Retirement statements
-  const retirement = await ctx.db.query("retirementStatements").collect();
-  for (const r of retirement) {
-    if (!r.dataSpaceId) {
-      await ctx.db.patch(r._id, { dataSpaceId });
-    }
-  }
-
-  // Watchlist
-  const watchlist = await ctx.db.query("watchlist").collect();
-  for (const w of watchlist) {
-    if (!w.dataSpaceId) {
-      await ctx.db.patch(w._id, { dataSpaceId });
+  for (const table of tables) {
+    const records = await ctx.db.query(table).collect();
+    for (const record of records) {
+      if (!record.dataSpaceId) {
+        await ctx.db.patch(record._id, { dataSpaceId });
+      }
     }
   }
 }

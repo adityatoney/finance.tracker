@@ -1,25 +1,25 @@
 "use client";
 
 import { useConvexAuth, useQuery, useMutation } from "convex/react";
-import { useAuth } from "@clerk/nextjs";
+import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "../../../convex/_generated/api";
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Loader2, ShieldAlert, TrendingUp } from "lucide-react";
 
 /**
- * Auth guard that handles user provisioning after Clerk authentication.
- * Clerk middleware handles the login redirect (server-side).
+ * Auth guard that handles user provisioning after authentication.
+ * Middleware handles the login redirect (server-side).
  * This component handles:
  * 1. First-time owner provisioning (auto-creates owner on first login)
- * 2. Unauthorized users (authenticated via Clerk but not in authorizedUsers)
- * 3. Invite page pass-through
+ * 2. Unauthorized users (authenticated but not in authorizedUsers)
+ * 3. Public route pass-through
  */
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { isLoading: isConvexLoading, isAuthenticated } = useConvexAuth();
-  const { signOut } = useAuth();
+  const { signOut } = useAuthActions();
 
   const isPublicRoute =
     pathname?.startsWith("/sign-in") || pathname?.startsWith("/invite/");
@@ -56,19 +56,25 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     }
   }, [isAuthenticated, hasOwner, currentUser, isProvisioning, provisionOwner]);
 
+  // Redirect unauthenticated users to sign-in
+  useEffect(() => {
+    if (!isConvexLoading && !isAuthenticated && !isPublicRoute) {
+      router.replace("/sign-in");
+    }
+  }, [isConvexLoading, isAuthenticated, isPublicRoute, router]);
+
   // Public routes render freely
   if (isPublicRoute) {
     return <>{children}</>;
   }
 
-  // Loading state (Convex syncing with Clerk)
+  // Loading state (Convex syncing)
   if (isConvexLoading) {
     return <LoadingScreen message="Connecting..." />;
   }
 
-  // Not authenticated — redirect to sign-in as a client-side fallback
+  // Not authenticated — waiting for redirect
   if (!isAuthenticated) {
-    router.replace("/sign-in");
     return <LoadingScreen message="Redirecting to login..." />;
   }
 
@@ -88,7 +94,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       <ErrorScreen
         title="Setup Error"
         message={provisionError}
-        onSignOut={() => signOut()}
+        onSignOut={() => void signOut()}
       />
     );
   }
@@ -99,7 +105,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       <ErrorScreen
         title="Access Denied"
         message="You are not authorized to access this application. Please contact the owner for an invite link."
-        onSignOut={() => signOut()}
+        onSignOut={() => void signOut()}
       />
     );
   }
