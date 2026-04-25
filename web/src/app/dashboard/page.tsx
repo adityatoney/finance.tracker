@@ -124,6 +124,7 @@ export default function DashboardPage() {
     api.holdings.listForMonth,
     latestMonth ? { month: latestMonth } : "skip"
   );
+  const portfolioTwr = useQuery(api.twr.getTwr, { scope: "portfolio" });
 
   // MoM table sort
   const [momSortDir, setMomSortDir] = useState<"asc" | "desc">("desc");
@@ -315,10 +316,21 @@ export default function DashboardPage() {
               icon={Target}
             />
             <StatCard
-              label="Positions"
-              value={`${holdingsList.length}`}
-              subValue={`Across ${brokerages.size} brokerage${brokerages.size !== 1 ? "s" : ""}`}
-              icon={PieChart}
+              label="TWR"
+              value={
+                portfolioTwr
+                  ? `${(portfolioTwr.twrCumulative * 100) >= 0 ? "+" : ""}${(portfolioTwr.twrCumulative * 100).toFixed(1)}%`
+                  : "—"
+              }
+              subValue={
+                portfolioTwr?.twrAnnualized != null
+                  ? `${(portfolioTwr.twrAnnualized * 100) >= 0 ? "+" : ""}${(portfolioTwr.twrAnnualized * 100).toFixed(1)}% annualized`
+                  : portfolioTwr
+                    ? "< 12 months of data"
+                    : "Upload 2+ statements"
+              }
+              icon={portfolioTwr && portfolioTwr.twrCumulative >= 0 ? TrendingUp : TrendingDown}
+              trend={portfolioTwr ? (portfolioTwr.twrCumulative >= 0 ? "up" : "down") : "neutral"}
             />
           </div>
 

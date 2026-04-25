@@ -134,6 +134,11 @@ export const upsertDataInternal = internalMutation({
     sector: v.optional(v.string()),
     lastUpdated: v.string(),
     lastHistoryUpdate: v.optional(v.string()),
+    // Denormalized valuation fields (set by DCF engine)
+    intrinsicValue: v.optional(v.float64()),
+    marginOfSafety: v.optional(v.float64()),
+    valuationClass: v.optional(v.string()),
+    valuationUpdated: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db

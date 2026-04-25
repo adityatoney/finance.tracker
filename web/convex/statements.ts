@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
 import { requireAuth } from "./lib/auth";
+import { recalculateAllTwrInternal } from "./twr";
 
 // ── PII Encryption (AES-256-GCM via Web Crypto API) ──
 // Key from environment variable, set in Convex dashboard
@@ -448,4 +449,7 @@ async function rebuildMonthInternal(ctx: any, month: string, dataSpaceId: string
       dataSpaceId,
     });
   }
+
+  // Recalculate TWR after snapshot rebuild
+  await recalculateAllTwrInternal(ctx, dataSpaceId);
 }

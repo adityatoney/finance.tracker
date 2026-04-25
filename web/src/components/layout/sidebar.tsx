@@ -13,6 +13,7 @@ import {
   Settings,
   TrendingUp,
   PiggyBank,
+  Shield,
   Sun,
   Moon,
   Monitor,
@@ -38,6 +39,7 @@ const navGroups = [
     items: [
       { href: "/holdings", label: "Holdings", icon: Wallet },
       { href: "/watchlist", label: "Watchlist", icon: Eye },
+      { href: "/moat", label: "Moat Analysis", icon: Shield },
       { href: "/ticker-map", label: "Ticker Map", icon: Tags },
     ],
   },

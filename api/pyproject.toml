@@ -13,6 +13,9 @@ dependencies = [
     "pdfplumber>=0.11.0",
     "python-multipart>=0.0.7",
     "pandas>=2.2.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
 ]
 
 [project.optional-dependencies]

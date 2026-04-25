@@ -31,12 +31,76 @@ import {
   TrendingDown,
   Clock,
   AlertCircle,
+  Calculator,
+  Shield,
+  Info,
 } from "lucide-react";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { TickerDetailSheet } from "@/components/valuation/ticker-detail-sheet";
+import Link from "next/link";
 
-type SortField = "ticker" | "name" | "price" | "changePct" | "change1m" | "change6m" | "change1y" | "change3y" | "change5y" | "pctInRange";
+type SortField = "ticker" | "name" | "price" | "changePct" | "change1m" | "change6m" | "change1y" | "change3y" | "change5y" | "pctInRange" | "marginOfSafety";
 type SortDir = "asc" | "desc";
-type FilterType = "all" | "gainers" | "losers";
+type FilterType = "all" | "gainers" | "losers" | "undervalued";
+
+function ValuationBadge({ data }: { data: any }) {
+  if (!data?.valuationClass) return <span className="text-muted-foreground text-xs">—</span>;
+
+  // Skip/error states
+  if (data.valuationClass === "etf_skip") {
+    return <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">ETF Skipped</span>;
+  }
+  if (data.valuationClass === "restricted") {
+    return <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-amber-50 text-amber-600 dark:bg-amber-950 dark:text-amber-400">Restricted</span>;
+  }
+  if (data.valuationClass === "rate_limited") {
+    return <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-50 text-orange-600 dark:bg-orange-950 dark:text-orange-400">Rate Limited</span>;
+  }
+  if (data.valuationClass === "error") {
+    return <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-red-50 text-red-500 dark:bg-red-950 dark:text-red-400">Error</span>;
+  }
+
+  const colors: Record<string, string> = {
+    deep_value: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+    value: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
+    fair: "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300",
+    overvalued: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+  };
+  const labels: Record<string, string> = {
+    deep_value: "Deep Value",
+    value: "Value",
+    fair: "Fair",
+    overvalued: "Overvalued",
+  };
+  const mos = data.marginOfSafety ?? 0;
+  const isUnder = mos > 0;
+
+  return (
+    <div className="text-center space-y-0.5">
+      <span className={cn("inline-block rounded-full px-2 py-0.5 text-[10px] font-medium", colors[data.valuationClass] || "bg-gray-100 text-gray-800")}>
+        {labels[data.valuationClass] || data.valuationClass}
+      </span>
+      {data.intrinsicValue != null && data.intrinsicValue > 0 && (
+        <>
+          <p className="text-[9px] text-muted-foreground tabular-nums">
+            Fair: ${data.intrinsicValue.toFixed(0)}
+          </p>
+          <p className={cn(
+            "text-[9px] tabular-nums font-medium",
+            isUnder ? "text-emerald-600 dark:text-emerald-400" : "text-red-500 dark:text-red-400"
+          )}>
+            {isUnder ? `${mos.toFixed(0)}% upside` : `${Math.abs(mos).toFixed(0)}% over`}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
 
 function isMarketOpen(): boolean {
   const now = new Date();
@@ -101,6 +165,8 @@ export default function WatchlistPage() {
   const removeTicker = useMutation(api.watchlist.remove);
   const refreshTickerAction = useAction(api.watchlist.refreshTicker);
   const refreshAllAction = useAction(api.watchlist.refreshAll);
+  const calculateAllDcfAction = useAction(api.valuation.calculateAllDcf);
+  const moatAnalyses = useQuery(api.moat.listAnalyses);
 
   const [newTicker, setNewTicker] = useState("");
   const [search, setSearch] = useState("");
@@ -109,7 +175,32 @@ export default function WatchlistPage() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [loadingTickers, setLoadingTickers] = useState<Set<string>>(new Set());
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [runningDcf, setRunningDcf] = useState(false);
+  const [detailTicker, setDetailTicker] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Build a map of moat analyses by ticker for badge display
+  const moatByTicker = useMemo(() => {
+    const map = new Map<string, { overallScore: number; moatType: string }>();
+    if (moatAnalyses) {
+      for (const a of moatAnalyses) {
+        map.set(a.ticker, { overallScore: a.overallScore, moatType: a.moatType });
+      }
+    }
+    return map;
+  }, [moatAnalyses]);
+
+  const handleRunDcf = async () => {
+    setRunningDcf(true);
+    setError(null);
+    try {
+      await calculateAllDcfAction({});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to run DCF");
+    } finally {
+      setRunningDcf(false);
+    }
+  };
 
   const marketOpen = isMarketOpen();
 
@@ -200,6 +291,7 @@ export default function WatchlistPage() {
     // Filter
     if (filter === "gainers") result = result.filter((w) => (w.data?.changePct ?? 0) > 0);
     if (filter === "losers") result = result.filter((w) => (w.data?.changePct ?? 0) < 0);
+    if (filter === "undervalued") result = result.filter((w) => (w.data?.marginOfSafety ?? -1) > 0);
 
     // Sort
     result.sort((a, b) => {
@@ -228,6 +320,7 @@ export default function WatchlistPage() {
   const allCount = watchlist?.length ?? 0;
   const gainerCount = watchlist?.filter((w) => (w.data?.changePct ?? 0) > 0).length ?? 0;
   const loserCount = watchlist?.filter((w) => (w.data?.changePct ?? 0) < 0).length ?? 0;
+  const undervaluedCount = watchlist?.filter((w) => (w.data?.marginOfSafety ?? -1) > 0).length ?? 0;
 
   // Latest update across all tickers
   const latestUpdate = useMemo(() => {
@@ -262,6 +355,7 @@ export default function WatchlistPage() {
     { key: "all", label: "All", count: allCount },
     { key: "gainers", label: "Gainers", count: gainerCount, icon: TrendingUp },
     { key: "losers", label: "Losers", count: loserCount, icon: TrendingDown },
+    { key: "undervalued", label: "Undervalued", count: undervaluedCount, icon: Calculator },
   ];
 
   return (
@@ -289,6 +383,19 @@ export default function WatchlistPage() {
               {formatTimeAgo(latestUpdate)}
             </span>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRunDcf}
+            disabled={runningDcf || allCount === 0}
+            title="Run DCF valuation on all tickers"
+          >
+            {runningDcf ? (
+              <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Running DCF...</>
+            ) : (
+              <><Calculator className="mr-1.5 h-3.5 w-3.5" /> Run DCF</>
+            )}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -434,6 +541,67 @@ export default function WatchlistPage() {
                         52W Range <SortIcon field="pctInRange" />
                       </button>
                     </TableHead>
+                    <TableHead className="text-center">
+                      <div className="inline-flex items-center gap-1">
+                        <button onClick={() => handleSort("marginOfSafety")} className="inline-flex items-center text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
+                          Valuation <SortIcon field="marginOfSafety" />
+                        </button>
+                        <Popover>
+                          <PopoverTrigger className="text-muted-foreground hover:text-foreground transition-colors">
+                            <Info className="h-3.5 w-3.5" />
+                          </PopoverTrigger>
+                          <PopoverContent className="w-80 text-left text-xs" side="bottom" align="center">
+                            <p className="font-semibold text-sm mb-2">Valuation Legend</p>
+                            <p className="text-muted-foreground mb-3">
+                              Based on a <span className="font-medium text-foreground">Discounted Cash Flow (DCF)</span> model using 5 years of financial data from FMP.
+                            </p>
+                            <div className="space-y-1.5 mb-3">
+                              <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">Ratings</p>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 shrink-0">Deep Value</span>
+                                <span className="text-muted-foreground">&gt; 40% upside — significantly underpriced</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 shrink-0">Value</span>
+                                <span className="text-muted-foreground">20–40% upside — moderately underpriced</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300 shrink-0">Fair</span>
+                                <span className="text-muted-foreground">0–20% upside — roughly fair value</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 shrink-0">Overvalued</span>
+                                <span className="text-muted-foreground">X% over — priced above fair value</span>
+                              </div>
+                            </div>
+                            <div className="space-y-1.5 mb-3">
+                              <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">Status</p>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 shrink-0">ETF Skipped</span>
+                                <span className="text-muted-foreground">ETFs/funds have no individual financials</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-amber-50 text-amber-600 dark:bg-amber-950 dark:text-amber-400 shrink-0">Restricted</span>
+                                <span className="text-muted-foreground">Ticker not available on FMP free tier</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="inline-block rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-50 text-orange-600 dark:bg-orange-950 dark:text-orange-400 shrink-0">Rate Limited</span>
+                                <span className="text-muted-foreground">API rate limit hit — retry later</span>
+                              </div>
+                            </div>
+                            <div className="border-t pt-2 space-y-1">
+                              <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-wider">Metrics</p>
+                              <p><span className="font-medium text-foreground">Fair</span> <span className="text-muted-foreground">— estimated fair price per share based on discounted future cash flows</span></p>
+                              <p><span className="font-medium text-emerald-600">X% upside</span> <span className="text-muted-foreground">— current price is below fair value (potential buy)</span></p>
+                              <p><span className="font-medium text-red-500">X% over</span> <span className="text-muted-foreground">— current price exceeds fair value (potentially overpriced)</span></p>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-center text-xs font-semibold uppercase tracking-wider">
+                      Moat
+                    </TableHead>
                     <TableHead className="text-right text-xs font-semibold uppercase tracking-wider">
                       Actions
                     </TableHead>
@@ -479,6 +647,27 @@ export default function WatchlistPage() {
                         <TableCell className="py-3">
                           <RangeBar pct={d?.pctInRange} low={d?.low52w} high={d?.high52w} />
                         </TableCell>
+                        <TableCell className="py-3 text-center">
+                          <button onClick={() => setDetailTicker(w.ticker)} className="hover:opacity-80 transition-opacity">
+                            <ValuationBadge data={d} />
+                          </button>
+                        </TableCell>
+                        <TableCell className="py-3 text-center">
+                          {moatByTicker.has(w.ticker) ? (
+                            <Link href={`/moat?ticker=${w.ticker}`}>
+                              <span className={cn(
+                                "inline-block rounded-full px-2 py-0.5 text-[10px] font-medium",
+                                moatByTicker.get(w.ticker)!.moatType === "wide" ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" :
+                                moatByTicker.get(w.ticker)!.moatType === "narrow" ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" :
+                                "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300"
+                              )}>
+                                {Math.round(moatByTicker.get(w.ticker)!.overallScore)}
+                              </span>
+                            </Link>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">—</span>
+                          )}
+                        </TableCell>
                         <TableCell className="py-3 text-right">
                           <div className="flex items-center justify-end gap-1">
                             <Button
@@ -516,7 +705,7 @@ export default function WatchlistPage() {
                   })}
                   {items.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={11} className="py-12 text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={13} className="py-12 text-center text-sm text-muted-foreground">
                         No tickers match your filters.
                       </TableCell>
                     </TableRow>
@@ -527,6 +716,13 @@ export default function WatchlistPage() {
           </Card>
         </>
       )}
+
+      {/* Ticker Detail Sheet */}
+      <TickerDetailSheet
+        ticker={detailTicker ?? ""}
+        open={detailTicker !== null}
+        onOpenChange={(open) => { if (!open) setDetailTicker(null); }}
+      />
     </div>
   );
 }
