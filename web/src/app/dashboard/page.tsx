@@ -128,6 +128,7 @@ export default function DashboardPage() {
 
   // MoM table sort
   const [momSortDir, setMomSortDir] = useState<"asc" | "desc">("desc");
+  const [selectedAllocMonth, setSelectedAllocMonth] = useState<string | null>(null);
 
   if (snapshots === undefined || statements === undefined || depositsByMonth === undefined) {
     return <DashboardSkeleton />;
@@ -212,13 +213,14 @@ export default function DashboardPage() {
     return Array.from(monthMap.values()).sort((a, b) => a.month.localeCompare(b.month));
   })();
 
-  // ── Allocation data ──
+  // ── Allocation data (responds to selected month) ──
+  const allocMonth = selectedAllocMonth ?? currentMonth;
   const allocationData: AllocationSlice[] = (() => {
-    if (!currentMonth) return [];
-    const latest = snapshots.filter((s) => s.month === currentMonth);
-    const total = latest.reduce((sum, s) => sum + s.totalValue, 0);
+    if (!allocMonth) return [];
+    const monthSnaps = snapshots.filter((s) => s.month === allocMonth);
+    const total = monthSnaps.reduce((sum, s) => sum + s.totalValue, 0);
     return CATEGORY_ORDER.map((cat) => {
-      const snap = latest.find((s) => s.category === cat);
+      const snap = monthSnaps.find((s) => s.category === cat);
       const value = snap?.totalValue ?? 0;
       return {
         category: cat, label: CATEGORIES[cat].label, value,
@@ -380,8 +382,19 @@ export default function DashboardPage() {
                         const returnPct = prevData && prevData.total > 0
                           ? (data.gain / prevData.total) * 100
                           : 0;
+                        const isSelected = m === selectedAllocMonth;
                         return (
-                          <TableRow key={m} className={cn("text-sm", i % 2 === 1 && "bg-muted/30")}>
+                          <TableRow
+                            key={m}
+                            className={cn(
+                              "text-sm cursor-pointer transition-colors",
+                              isSelected
+                                ? "bg-primary/5 border-l-2 border-l-primary"
+                                : i % 2 === 1 ? "bg-muted/30" : "",
+                              "hover:bg-primary/5"
+                            )}
+                            onClick={() => setSelectedAllocMonth(isSelected ? null : m)}
+                          >
                             <TableCell className="font-semibold">{formatMonth(m)}</TableCell>
                             <TableCell className="text-right tabular-nums font-medium">{formatCurrency(data.total)}</TableCell>
                             <TableCell className="text-right tabular-nums text-blue-600">{formatCurrency(data.deposits)}</TableCell>
@@ -406,7 +419,17 @@ export default function DashboardPage() {
 
           {/* Allocation — at the bottom */}
           <div className="space-y-3">
-            <SectionHeader icon={PieChart} title="Allocation" />
+            <div className="flex items-center justify-between">
+              <SectionHeader icon={PieChart} title={`Allocation${allocMonth ? ` — ${formatMonth(allocMonth)}` : ""}`} />
+              {selectedAllocMonth && (
+                <button
+                  onClick={() => setSelectedAllocMonth(null)}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Show latest
+                </button>
+              )}
+            </div>
             <Card>
               <CardContent className="pt-6">
                 <AllocationDonutChart data={allocationData} />
